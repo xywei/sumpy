@@ -26,6 +26,7 @@ from six.moves import range, zip
 
 import loopy as lp
 import numpy as np
+from pymbolic.primitives import Expression
 from pymbolic.mapper import IdentityMapper, CSECachingMapperMixin
 from sumpy.symbolic import pymbolic_real_norm_2
 from pymbolic.primitives import make_sym_vector
@@ -392,6 +393,94 @@ one_kernel_3d = ExpressionKernel(
         expression=1,
         global_scaling_const=1,
         is_complex_valued=False)
+
+
+# {{{ expression kernel factory
+
+class ExpressionKernelFactory():
+    """Factory class that helps manage kernel kwargs, hashing, etc.
+    """
+
+    def __init__(self, name, kernel_expr, kernel_data={}, kernel_meta={}):
+        """
+        :param kernel_expr: a :class:`pymbolic.primitives.Expression` expression,
+            or a tuple of two expressions `(scaling, expr)`.
+        :param kernel_data: a :class:`dict` of (name, dtype). The members of this
+            dictionary are passed as kernel arguments to ``loopy``.
+        :param kernel_meta: a :class:`dict` of (name, defualt value). The members
+            of this dictionary are stored in the kernel class and the information
+            is hard-coded (directly or in-directly) in the generated code.
+        """
+        if isinstance(kernel_expr, Expression):
+            self.expr = kernel_expr
+            self.scaling = 1
+        else:
+            self.scaling, self.expr = kernel_expr
+
+        self.name = name
+        self.kernel_data = kernel_data
+        self.kernel_meta = kernel_meta
+
+    def __call__(self):
+
+        # self is shadowed inside the following functions
+        expr = self.expr
+        scaling = self.scaling
+        kernel_data = self.kernel_data
+
+        def constructor(self, dim=None,
+                        is_complex_valued=False, **kwargs):
+
+            super(self.__class__, self).__init__(
+                    dim, expression=expr,
+                    global_scaling_const=scaling,
+                    is_complex_valued=is_complex_valued,)
+
+            for key, val in kwargs:
+                setattr(self, key, val)
+
+        def get_init_args(self):
+            return tuple(
+                    getattr(self, iarg)
+                    for iarg in self.__class__.init_arg_names)
+
+        def update_persistent_hash(self, key_hash, key_builder):
+            key_hash.update(type(self).__name__.encode("utf8"))
+            key_builder.rec(key_hash, self.__getinitargs__())
+
+        def knl_repr(self):
+            args = ",".join(
+                    [str(ag) for ag, nm in zip(
+                        self.__getinitargs__(), self.__class__.init_arg_names)
+                     if nm != "dim"])
+            if len(args) > 0:
+                arg_rep = f"({args})"
+            else:
+                arg_rep = ""
+            return f"{self.__class__.__name__}{self.dim}D{arg_rep}"
+
+        def prepare_loopy_kernel(self, loopy_knl):
+            # TODO: identify necessary mangling for codegen
+            return loopy_knl
+
+        def get_loopy_args(self):
+            return [KernelArgument(
+                loopy_arg=lp.ValueArg(arg_name, arg_dtype))
+                for arg_name, arg_dtype in kernel_data]
+
+        return type(self.name, (ExpressionKernel, ), {
+            "init_arg_names": (("dim", ) + tuple(self.kernel_data.keys())
+                               + tuple(self.kernel_meta.keys())),
+            "__init__": constructor,
+            "__getinitargs__": get_init_args,
+            "update_persistent_hash": update_persistent_hash,
+            "__repr__": knl_repr,
+            "prepare_loopy_kernel": prepare_loopy_kernel,
+            "get_args": get_loopy_args,
+            "mapper_method": "map_expression_kernel",
+            })
+
+# }}}
 
 
 # {{{ PDE kernels
