@@ -114,12 +114,15 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
     """
 
     def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):
-        from sumpy.tools import MiDerivativeTaker
-        ppkernel = kernel.postprocess_at_source(kernel.get_expression(avec), avec)
+        from sumpy.tools import MiDerivativeTaker, my_syntactic_subs
 
-        taker = MiDerivativeTaker(ppkernel, avec)
-        return [
-                taker.diff(mi) * rscale ** sum(mi)
+        rad = avec + bvec  # source to center + center to target = source to target
+        ppkernel = kernel.postprocess_at_source(kernel.get_expression(rad), rad)
+
+        taker = MiDerivativeTaker(ppkernel, bvec)
+
+        return [my_syntactic_subs(taker.diff(mi) * rscale ** sum(mi),
+                                  {bvc: 0 for bvc in bvec})
                 for mi in self.get_coefficient_identifiers()]
 
     def evaluate(self, coeffs, bvec, rscale, sac=None):

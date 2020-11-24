@@ -86,17 +86,22 @@ def expand(expansion_nr, sac, expansion, avec, bvec):
 class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
     def __init__(self, ctx, expansions, strength_usage=None,
             value_dtypes=None,
-            name=None, device=None):
+            name=None, device=None, scaling_at_target=None):
         KernelComputation.__init__(self, ctx, expansions, strength_usage,
                 value_dtypes,
                 name, device)
 
         from pytools import single_valued
         self.dim = single_valued(knl.dim for knl in self.expansions)
+        self._vector_names = {"a", "b"}
+
+        # if not None, a sympy expression for the scaling
+        self._scaling_at_target = scaling_at_target
 
     def get_cache_key(self):
         return (type(self).__name__, tuple(self.kernels),
-                tuple(self.strength_usage), tuple(self.value_dtypes))
+                tuple(self.strength_usage), tuple(self.value_dtypes),
+                str(self._scaling_at_target))
 
     @property
     def expansions(self):
@@ -122,7 +127,7 @@ class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
         from sumpy.codegen import to_loopy_insns
         loopy_insns = to_loopy_insns(
                 sac.assignments.items(),
-                vector_names={"a", "b"},
+                vector_names=self._vector_names,
                 pymbolic_expr_maps=[
                     expn.kernel.get_code_transformer() for expn in self.expansions],
                 retain_names=result_names,
@@ -215,6 +220,20 @@ class LayerPotential(LayerPotentialBase):
                 None, shape="ntargets", order="C")
             for i in range(len(self.kernels))])
 
+        if self._scaling_at_target:
+            sat = "sat * "  # inject the multiplicative scaling
+            from sumpy.codegen import to_loopy_insns
+            sat_insns = to_loopy_insns(
+                [("sat", self._scaling_at_target)],
+                vector_names=self._vector_names,
+                pymbolic_expr_maps=[
+                    expn.kernel.get_code_transformer() for expn in self.expansions],
+                retain_names=["sat"],
+                complex_dtype=np.complex128)  # FIXME
+        else:
+            sat = ""
+            sat_insns = []
+
         loopy_knl = lp.make_kernel(["""
             {[itgt, isrc, idim]: \
                 0 <= itgt < ntargets and \
@@ -227,11 +246,12 @@ class LayerPotential(LayerPotentialBase):
             + ["<> b[idim] = tgt[idim, itgt] - center[idim, itgt] {dup=idim}"]
             + ["<> rscale = expansion_radii[itgt]"]
             + loopy_insns + kernel_exprs
+            + sat_insns
             + ["""
-                result_{i}[itgt] = knl_{i}_scaling * \
+                result_{i}[itgt] = knl_{i}_scaling * {sat} \
                     simul_reduce(sum, isrc, pair_result_{i}) \
                         {{id_prefix=write_lpot,inames=itgt}}
-                """.format(i=iknl)
+                """.format(i=iknl, sat=sat)
                 for iknl in range(len(self.expansions))]
             + ["end"],
             arguments,
