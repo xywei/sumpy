@@ -117,7 +117,7 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         from sumpy.tools import MiDerivativeTaker, my_syntactic_subs
 
         rad = avec + bvec  # source to center + center to target = source to target
-        ppkernel = kernel.postprocess_at_source(kernel.get_expression(rad), rad)
+        ppkernel = kernel.postprocess_at_source(kernel.get_expression(rad), avec)
 
         taker = MiDerivativeTaker(ppkernel, bvec)
 
