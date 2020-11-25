@@ -86,7 +86,7 @@ def expand(expansion_nr, sac, expansion, avec, bvec):
 class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
     def __init__(self, ctx, expansions, strength_usage=None,
             value_dtypes=None,
-            name=None, device=None, scaling_at_target=None):
+            name=None, device=None, scales_at_target=None):
         KernelComputation.__init__(self, ctx, expansions, strength_usage,
                 value_dtypes,
                 name, device)
@@ -95,13 +95,16 @@ class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
         self.dim = single_valued(knl.dim for knl in self.expansions)
         self._vector_names = {"a", "b"}
 
-        # if not None, a sympy expression for the scaling
-        self._scaling_at_target = scaling_at_target
+        # an optional list of sympy expressions for the scales applied
+        # to each expansion at last
+        if scales_at_target:
+            assert len(scales_at_target) == len(expansions)
+        self._scales_at_target = scales_at_target
 
     def get_cache_key(self):
         return (type(self).__name__, tuple(self.kernels),
                 tuple(self.strength_usage), tuple(self.value_dtypes),
-                str(self._scaling_at_target))
+                str(self._scales_at_target))
 
     @property
     def expansions(self):
@@ -220,18 +223,20 @@ class LayerPotential(LayerPotentialBase):
                 None, shape="ntargets", order="C")
             for i in range(len(self.kernels))])
 
-        if self._scaling_at_target:
-            sat = "sat * "  # inject the multiplicative scaling
+        if self._scales_at_target:
+            # inject the multiplicative scales of each output kernel
+            sats = [f"sat_{iknl} * " for iknl in range(len(self.expansions))]
             from sumpy.codegen import to_loopy_insns
             sat_insns = to_loopy_insns(
-                [("sat", self._scaling_at_target)],
+                [(f"sat_{iknl}", self._scale_at_target[iknl])
+                 for iknl in range(len(self.expansions))],
                 vector_names=self._vector_names,
                 pymbolic_expr_maps=[
                     expn.kernel.get_code_transformer() for expn in self.expansions],
-                retain_names=["sat"],
+                retain_names=[f"sat_{iknl}" for iknl in range(len(self.expansions))],
                 complex_dtype=np.complex128)  # FIXME
         else:
-            sat = ""
+            sats = ["", ] * len(self.expansions)
             sat_insns = []
 
         loopy_knl = lp.make_kernel(["""
@@ -251,7 +256,7 @@ class LayerPotential(LayerPotentialBase):
                 result_{i}[itgt] = knl_{i}_scaling * {sat} \
                     simul_reduce(sum, isrc, pair_result_{i}) \
                         {{id_prefix=write_lpot,inames=itgt}}
-                """.format(i=iknl, sat=sat)
+                """.format(i=iknl, sat=sats[iknl])
                 for iknl in range(len(self.expansions))]
             + ["end"],
             arguments,

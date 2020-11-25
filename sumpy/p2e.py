@@ -313,5 +313,3 @@ class P2EFromCSR(P2EBase):
         return knl(queue, centers=centers, rscale=rscale, **kwargs)
 
 # }}}
-
-# vim: foldmethod=marker

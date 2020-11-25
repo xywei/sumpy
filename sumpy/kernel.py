@@ -974,6 +974,48 @@ class DirectionalSourceDerivative(DirectionalDerivative):
 # }}}
 
 
+# {{{ rescaled kernels used by QBMAX
+
+class AsymptoticallyRescaledKernel(KernelWrapper):
+    init_arg_names = ("inner_kernel", "rescaled_expression", "scaling_expression")
+
+    def __init__(self, inner_kernel, rescaled_expression, scaling_expression):
+        """
+        :param rescaled_expression: A pymbolic expression. The kernel
+            expression after scaling.
+        :param scaling_expression: A pymbolic expression. The multiplier
+            used for scaling the inner_kernel.
+        """
+        super().__init__(inner_kernel)
+        self.rescaled_expression = rescaled_expression
+        self.scaling_expression = scaling_expression
+
+    def __repr__(self):
+        return "AsymKnl[%s]%dD" % (self.inner_kernel.__repr__(), self.dim)
+
+    def __getinitargs__(self):
+        return (self.inner_kernel, self.rescaled_expression, self.scaling_expression)
+
+    def get_expression(self, scaled_dist_vec):
+        from pymbolic.interop.sympy import PymbolicToSympyMapper
+        expr = PymbolicToSympyMapper()(self.rescaled_expression)
+        return expr
+
+    def get_scaling_expression(self, scaled_dist_vec):
+        from pymbolic.interop.sympy import PymbolicToSympyMapper
+        expr = PymbolicToSympyMapper()(self.scaling_expression)
+        return expr
+
+    def update_persistent_hash(self, key_hash, key_builder):
+        self.base_kernel.update_persistent_hash(key_hash, key_builder)
+        key_hash.update(str(self.rescaled_expression).encode("utf8"))
+        key_hash.update(str(self.scaling_expression).encode("utf8"))
+
+    mapper_method = "map_asymptotically_rescaled_kernel"
+
+# }}}
+
+
 # {{{ kernel mappers
 
 class KernelMapper:
