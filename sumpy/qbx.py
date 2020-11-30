@@ -247,7 +247,8 @@ class LayerPotential(LayerPotentialBase):
                     sat_insns_data,
                     vector_names=self._vector_names,
                     pymbolic_expr_maps=[
-                        expn.kernel.get_code_transformer() for expn in self.expansions],
+                        expn.kernel.get_code_transformer()
+                        for expn in self.expansions],
                     retain_names=[datpair[0] for datpair in sat_insns_data],
                     complex_dtype=np.complex128)  # FIXME
         else:
