@@ -86,7 +86,7 @@ def expand(expansion_nr, sac, expansion, avec, bvec):
 class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
     def __init__(self, ctx, expansions, strength_usage=None,
             value_dtypes=None,
-            name=None, device=None, scales_at_target=None):
+            name=None, device=None):
         KernelComputation.__init__(self, ctx, expansions, strength_usage,
                 value_dtypes,
                 name, device)
@@ -95,16 +95,9 @@ class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
         self.dim = single_valued(knl.dim for knl in self.expansions)
         self._vector_names = {"a", "b"}
 
-        # an optional list of sympy expressions for the scales applied
-        # to each expansion at last
-        if scales_at_target:
-            assert len(scales_at_target) == len(expansions)
-        self._scales_at_target = scales_at_target
-
     def get_cache_key(self):
         return (type(self).__name__, tuple(self.kernels),
-                tuple(self.strength_usage), tuple(self.value_dtypes),
-                str(self._scales_at_target))
+                tuple(self.strength_usage), tuple(self.value_dtypes))
 
     @property
     def expansions(self):
@@ -223,20 +216,41 @@ class LayerPotential(LayerPotentialBase):
                 None, shape="ntargets", order="C")
             for i in range(len(self.kernels))])
 
-        if self._scales_at_target:
-            # inject the multiplicative scales of each output kernel
-            sats = [f"sat_{iknl} * " for iknl in range(len(self.expansions))]
+        # "expansions" = kernels
+        sats = []
+        sat_insns_data = []
+        for iknl in range(len(self.kernels)):
+
+            from sumpy.expansion import ExpansionBase
+            if isinstance(self.expansions[iknl], ExpansionBase):
+                knl = self.expansions[iknl].kernel
+            else:
+                from sumpy.kernel import Kernel
+                assert isinstance(self.expansions[iknl], Kernel)
+                knl = self.expansions[iknl]
+
+            try:
+                sat_expr = knl.get_scaling_expression()
+            except AttributeError:
+                sat_expr = None
+
+            if sat_expr:
+                # inject the multiplicative scales of each output kernel
+                sats.append(f"sat_{iknl} * ")
+                sat_insns_data.append((f"sat_{iknl}", sat_expr))
+            else:
+                sats.append("")
+
+        if sat_insns_data:
             from sumpy.codegen import to_loopy_insns
             sat_insns = to_loopy_insns(
-                [(f"sat_{iknl}", self._scale_at_target[iknl])
-                 for iknl in range(len(self.expansions))],
-                vector_names=self._vector_names,
-                pymbolic_expr_maps=[
-                    expn.kernel.get_code_transformer() for expn in self.expansions],
-                retain_names=[f"sat_{iknl}" for iknl in range(len(self.expansions))],
-                complex_dtype=np.complex128)  # FIXME
+                    sat_insns_data,
+                    vector_names=self._vector_names,
+                    pymbolic_expr_maps=[
+                        expn.kernel.get_code_transformer() for expn in self.expansions],
+                    retain_names=[datpair[0] for datpair in sat_insns_data],
+                    complex_dtype=np.complex128)  # FIXME
         else:
-            sats = ["", ] * len(self.expansions)
             sat_insns = []
 
         loopy_knl = lp.make_kernel(["""

@@ -996,20 +996,24 @@ class AsymptoticallyRescaledKernel(KernelWrapper):
     def __getinitargs__(self):
         return (self.inner_kernel, self.rescaled_expression, self.scaling_expression)
 
-    def get_expression(self, scaled_dist_vec):
+    def get_expression(self, scaled_dist_vec=None):
         from pymbolic.interop.sympy import PymbolicToSympyMapper
         expr = PymbolicToSympyMapper()(self.rescaled_expression)
         return expr
 
-    def get_scaling_expression(self, scaled_dist_vec):
+    def get_scaling_expression(self, scaled_dist_vec=None):
         from pymbolic.interop.sympy import PymbolicToSympyMapper
         expr = PymbolicToSympyMapper()(self.scaling_expression)
         return expr
 
     def update_persistent_hash(self, key_hash, key_builder):
-        self.base_kernel.update_persistent_hash(key_hash, key_builder)
-        key_hash.update(str(self.rescaled_expression).encode("utf8"))
-        key_hash.update(str(self.scaling_expression).encode("utf8"))
+        for name, value in zip(self.init_arg_names, self.__getinitargs__()):
+            if name in ["rescaled_expression", "scaling_expression"]:
+                from pymbolic.mapper.persistent_hash import (
+                    PersistentHashWalkMapper as PersistentHashWalkMapper)
+                PersistentHashWalkMapper(key_hash)(value)
+            else:
+                key_builder.rec(key_hash, value)
 
     mapper_method = "map_asymptotically_rescaled_kernel"
 
