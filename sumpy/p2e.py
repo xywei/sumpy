@@ -68,12 +68,28 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         expansion = expansion.with_kernel(
                 TargetDerivativeRemover()(expansion.kernel))
 
+        from sumpy.kernel import AsymptoticallyRescaledKernel
+        base_knl = TargetDerivativeRemover()(expansion.kernel)
+        if base_knl != expansion.kernel:
+            if isinstance(base_knl, AsymptoticallyRescaledKernel):
+                # TODO: target derivatives of scaled kernels using Leibniz's rule
+                # (fg)' = f'g + fg' ==> f' = [(fg)' - fg'] / g
+                raise ValueError(
+                    "derivatives of scaled kernel is not currently supported.")
+
         self.expansion = expansion
         self.dim = expansion.dim
+        self._vector_names = {"a"}
 
-    def get_loopy_instructions(self):
+    def get_loopy_instructions(self, isotropic_expansion=True):
         from sumpy.symbolic import make_sym_vector
         avec = make_sym_vector("a", self.dim)
+
+        if isotropic_expansion:
+            bvec = None
+        else:
+            # non-isotropic expansions like QBMAX depend on bvec
+            bvec = make_sym_vector("b", self.dim)
 
         import sumpy.symbolic as sp
         rscale = sp.Symbol("rscale")
@@ -84,7 +100,7 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         coeff_names = []
         for knl_idx, kernel in enumerate(self.kernels):
             for i, coeff_i in enumerate(
-                self.expansion.coefficients_from_source(kernel, avec, None, rscale,
+                self.expansion.coefficients_from_source(kernel, avec, bvec, rscale,
                      sac)
             ):
                 sac.add_assignment(f"coeff{i}_{knl_idx}", coeff_i)
@@ -98,7 +114,7 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         from sumpy.codegen import to_loopy_insns
         return to_loopy_insns(
                 sac.assignments.items(),
-                vector_names={"a"},
+                vector_names=self._vector_names,
                 pymbolic_expr_maps=code_transformers,
                 retain_names=coeff_names,
                 complex_dtype=np.complex128  # FIXME

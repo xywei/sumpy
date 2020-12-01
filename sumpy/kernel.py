@@ -1058,6 +1058,7 @@ class KernelIdentityMapper(KernelMapper):
     map_yukawa_kernel = map_expression_kernel
     map_stokeslet_kernel = map_expression_kernel
     map_stresslet_kernel = map_expression_kernel
+    map_asymptotically_rescaled_kernel = map_expression_kernel
 
     def map_axis_target_derivative(self, kernel):
         return AxisTargetDerivative(kernel.axis, self.rec(kernel.inner_kernel))
@@ -1104,6 +1105,11 @@ class DerivativeCounter(KernelCombineMapper):
 
     map_directional_target_derivative = map_axis_target_derivative
     map_directional_source_derivative = map_axis_target_derivative
+
+
+class AsymptoticScalingRemover(KernelIdentityMapper):
+    def map_asymptotically_rescaled_kernel(self, kernel):
+        return self.rec(kernel.inner_kernel)
 
 # }}}
 
