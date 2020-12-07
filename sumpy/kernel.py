@@ -1009,8 +1009,21 @@ class _AsymptoticallyRescaledKernelExpressionFactory:
     def __init__(self, kernel, expr, geometric_order=1):
         self.dim = kernel.dim
         self.kernel = kernel
-        self.expr = expr
         self.geometric_order = geometric_order
+
+        from sympy import Expr
+        if isinstance(expr, Expr):
+            from sumpy.symbolic import SympyToPymbolicMapper
+            self._expr = SympyToPymbolicMapper()(expr)
+        else:
+            from pymbolic.primitives import Expression
+            assert isinstance(expr, Expression)
+            self._expr = expr
+
+    @property
+    def expr(self):
+        from sumpy.symbolic import PymbolicToSympyMapperWithSymbols
+        return PymbolicToSympyMapperWithSymbols()(self._expr)
 
     @memoize_method
     def _get_scaling_at_target(self, expn_class):
@@ -1171,13 +1184,22 @@ class AsymptoticallyInformedKernel(KernelWrapper):
     def __init__(self, inner_kernel, scaling_expression, geometric_order=1):
         """
         :param inner_kernel: A raw PDE kernel being rescaled.
-        :param scaling_expression: A pymbolic expression. The multiplier
+        :param scaling_expression: A pymbolic/sympy expression. The multiplier
             used for scaling the inner_kernel. The scaling is a function
             of "dist".
         :param geometric_order: An integer for the geometric order.
         """
         super().__init__(inner_kernel)
-        self.scaling_expression = scaling_expression
+
+        from sympy import Expr
+        if isinstance(scaling_expression, Expr):
+            from sumpy.symbolic import SympyToPymbolicMapper
+            self.scaling_expression = SympyToPymbolicMapper()(scaling_expression)
+        else:
+            from pymbolic.primitives import Expression
+            assert isinstance(scaling_expression, Expression)
+            self.scaling_expression = scaling_expression
+
         self.geometric_order = geometric_order
         self.asymptotics = _AsymptoticallyRescaledKernelExpressionFactory(
             inner_kernel, scaling_expression, geometric_order)
@@ -1190,6 +1212,10 @@ class AsymptoticallyInformedKernel(KernelWrapper):
     def __getinitargs__(self):
         return (self.inner_kernel, self.scaling_expression,
                 self.geometric_order)
+
+    def replace_inner_kernel(self, new_inner_kernel):
+        return type(self)(new_inner_kernel,
+                          self.scaling_expression, self.geometric_order)
 
     def set_expansion_class(self, expn_class):
         self._expn_class = expn_class
