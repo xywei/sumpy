@@ -23,11 +23,12 @@ THE SOFTWARE.
 
 import loopy as lp
 import numpy as np
+import sumpy.symbolic as sym
 from pymbolic.mapper import IdentityMapper, CSECachingMapperMixin
 from sumpy.symbolic import pymbolic_real_norm_2
 from pymbolic.primitives import make_sym_vector
 from pymbolic import var
-
+from pytools import memoize_method
 
 __doc__ = """
 Kernel interface
@@ -976,39 +977,255 @@ class DirectionalSourceDerivative(DirectionalDerivative):
 
 # {{{ rescaled kernels used by QBMAX
 
-class AsymptoticallyRescaledKernel(KernelWrapper):
-    init_arg_names = ("inner_kernel", "rescaled_expression", "scaling_expression")
+class _AsymptoticallyRescaledKernelExpressionFactory:
+    """The rescaled kernels depend on expansion methods. This class isolates
+    mathematical asymptotic expansions that depend solely on the kernel and
+    abstract geometry.
 
-    def __init__(self, inner_kernel, rescaled_expression, scaling_expression):
+    .. attribute :: dim
+
+       The dimension of the ambient space.
+
+    .. attribute :: kernel
+
+       A :class:`~sumpy.kernel.Kernel` object.
+
+    .. attribute :: expr
+
+       The asymptotic expansions. A scalar expression that depends on distance
+       from the boundary (denoted by the symbol "dist"), satisfying the
+       normalizing condition:
+
+         expr(dist=0) = 1
+
+    .. attribute :: geometric_order
+
+       Order of geometric approximation when computing the distance to
+       boundary. For example, when order=1, the distance is calculated using a
+       first-order approximation to the boundary using QBX disk's radius and
+       the point of tangency.
+    """
+
+    def __init__(self, kernel, expr, geometric_order=1):
+        self.dim = kernel.dim
+        self.kernel = kernel
+        self.expr = expr
+        self.geometric_order = geometric_order
+
+    @memoize_method
+    def _get_scaling_at_target(self, expn_class):
+        """Target-dependent scaling expression, used for scaling back the
+        potential after summing up the expansion.
         """
-        :param rescaled_expression: A pymbolic expression. The kernel
-            expression after scaling.
+        full_scaling = self._get_scaling_for_expansion(expn_class)
+
+        from sumpy.expansion.local import (
+            LineTaylorLocalExpansion, VolumeTaylorLocalExpansionBase)
+        if issubclass(expn_class, LineTaylorLocalExpansion):
+            sym_map = {sym.sym.Symbol("tau"): 1}  # target is at tau=1
+        elif issubclass(expn_class, VolumeTaylorLocalExpansionBase):
+            sym_map = {}
+        else:
+            raise ValueError("unsupported expansion class")
+
+        return full_scaling.subs(sym_map)
+
+    @memoize_method
+    def _get_scaling_for_expansion(self, expn_class):
+        """Target-dependent scaling expression, including the virtual variables
+        like "tau" for taking expansions.
+        """
+        sym_map = self._get_symbol_map(expn_class)
+        expr_h = self._approximate_expr()
+        scaling = expr_h.subs(sym_map)
+        return scaling
+
+    @memoize_method
+    def _get_rescaled_kernel_expr(self, expn_class):
+        """Apply scaling to the kernel expression.
+        """
+        kernel_expr = self._get_kernel_expression_at_source(expn_class)
+        scaling = self._get_scaling_for_expansion(expn_class)
+        return kernel_expr / scaling
+
+    @memoize_method
+    def _approximate_expr(self):
+        """Transform the expression by approximating the distance with
+        geometric information known to the QBX routine.
+        """
+        normal, target, dist, rad = (
+            self._nvec, self._tvec, self._dist, self._radius)
+
+        if self.geometric_order == 1:
+            dist_approx = rad - normal.dot(target)
+        else:
+            # need curvature information for higher order approximations
+            raise NotImplementedError
+
+        return self.expr.subs(dist, dist_approx)
+
+    @memoize_method
+    def _get_symbol_map(self, expn_class):
+        """Get interpretation of ``nvec`` and ``tvec`` that depends on the
+        expansion class.
+        """
+        from sumpy.expansion.local import (
+            LineTaylorLocalExpansion, VolumeTaylorLocalExpansionBase)
+
+        bvec = sym.make_sym_vector("b", self.dim)
+
+        if issubclass(expn_class, LineTaylorLocalExpansion):
+            # in a line expansion, bvec is the normal, and the actual target is
+            # identified with tau.
+
+            bvec_norm = sym.sym.sqrt(bvec.dot(bvec))
+            sym_map = {
+                self._radius: bvec_norm
+            }
+
+            # self._nvec: bvec / bvec_norm
+            for lhs, rhs in zip(self._nvec, bvec):
+                sym_map[lhs] = rhs / bvec_norm
+
+            # self._tvec: sym.Symbol("tau") * bvec
+            for lhs, rhs in zip(self._tvec, bvec):
+                sym_map[lhs] = sym.sym.Symbol("tau") * rhs
+
+        elif issubclass(expn_class, VolumeTaylorLocalExpansionBase):
+            sym_map = {
+                # disk radius is used as rscale
+                self._radius: sym.sym.Symbol("rscale"),
+            }
+
+            # self._nvec: normal / norm(normal)
+            normal = sym.make_sym_vector("normal", self.dim)
+            normal_norm = sym.sym.sqrt(normal.dot(normal))
+            for lhs, rhs in zip(self._nvec, normal):
+                sym_map[lhs] = rhs / normal_norm
+
+            # self._tvec: bvec
+            for lhs, rhs in zip(self._tvec, bvec):
+                sym_map[lhs] = rhs
+
+        else:
+            raise ValueError("unsupported expansion class")
+
+        return sym_map
+
+    @memoize_method
+    def _get_kernel_expression_at_source(self, expn_class):
+        """Kernel expression used by ``coefficients_from_source``.
+        """
+        from sumpy.expansion.local import (
+            LineTaylorLocalExpansion, VolumeTaylorLocalExpansionBase)
+
+        avec = sym.make_sym_vector("a", self.dim)
+        bvec = sym.make_sym_vector("b", self.dim)
+
+        if issubclass(expn_class, LineTaylorLocalExpansion):
+            tau = sym.sym.Symbol("tau")
+            avec_line = avec + tau*bvec
+            return self.kernel.get_expression(avec_line)
+        elif issubclass(expn_class, VolumeTaylorLocalExpansionBase):
+            rad = avec + bvec
+            return self.kernel.postprocess_at_source(
+                self.kernel.get_expression(rad), avec)
+        else:
+            raise ValueError(
+                f"unsupported expansion class for QBMAX: {expn_class.__name__}")
+
+    @property
+    def _dist(self):
+        """The distance of the target point from the boundary.
+        """
+        return sym.sym.Symbol("dist")
+
+    @property
+    def _nvec(self):
+        """The unit normal vector obtained by normalizing the vector from the
+        QBX expansion center to the point of tangency.
+        """
+        return sym.make_sym_vector("nvec", self.dim)
+
+    @property
+    def _tvec(self):
+        """The vector from the QBX expansion center to the evaluation target
+        point.
+        """
+        return sym.make_sym_vector("tvec", self.dim)
+
+    @property
+    def _radius(self):
+        """Radius of the QBX disk, aka distance of the expansion center from
+        the boundary.
+        """
+        return sym.sym.Symbol("radius")
+
+
+class AsymptoticallyInformedKernel(KernelWrapper):
+    """An asymptotically informed kernel should behave the same as its inner kernel
+    if the handler does not know how to take advantage of the added information.
+    """
+    init_arg_names = ("inner_kernel", "scaling_expression", "geometric_order")
+
+    def __init__(self, inner_kernel, scaling_expression, geometric_order=1):
+        """
+        :param inner_kernel: A raw PDE kernel being rescaled.
         :param scaling_expression: A pymbolic expression. The multiplier
-            used for scaling the inner_kernel.
+            used for scaling the inner_kernel. The scaling is a function
+            of "dist".
+        :param geometric_order: An integer for the geometric order.
         """
         super().__init__(inner_kernel)
-        self.rescaled_expression = rescaled_expression
         self.scaling_expression = scaling_expression
+        self.geometric_order = geometric_order
+        self.asymptotics = _AsymptoticallyRescaledKernelExpressionFactory(
+            inner_kernel, scaling_expression, geometric_order)
+
+        self._expn_class = None
 
     def __repr__(self):
-        return "AsymKnl[%s]%dD" % (self.inner_kernel.__repr__(), self.dim)
+        return "AsymKnl[%s]" % (self.inner_kernel.__repr__(),)
 
     def __getinitargs__(self):
-        return (self.inner_kernel, self.rescaled_expression, self.scaling_expression)
+        return (self.inner_kernel, self.scaling_expression,
+                self.geometric_order)
 
-    def get_expression(self, scaled_dist_vec=None):
-        from pymbolic.interop.sympy import PymbolicToSympyMapper
-        expr = PymbolicToSympyMapper()(self.rescaled_expression)
-        return expr
+    def set_expansion_class(self, expn_class):
+        self._expn_class = expn_class
 
-    def get_scaling_expression(self, scaled_dist_vec=None):
-        from pymbolic.interop.sympy import PymbolicToSympyMapper
-        expr = PymbolicToSympyMapper()(self.scaling_expression)
-        return expr
+    def get_expression(self, scaled_dist_vec, expn_class=None):
+
+        # In this special case, we allow falling back to the inner kernel
+        # to be compatible with p2p. In the meanwhile, be careful not to
+        # include the scaling into the p2p result.
+        from sumpy.symbolic import make_sym_vector
+        dvec = make_sym_vector("d", self.dim)
+        if scaled_dist_vec == dvec:
+            return self.inner_kernel.get_expression(scaled_dist_vec)
+
+        if not expn_class:
+            expn_class = self._expn_class
+        if not expn_class:
+            # fallback to the inner kernel
+            return self.inner_kernel.get_expression(scaled_dist_vec)
+        return self.asymptotics._get_rescaled_kernel_expr(expn_class)
+
+    def get_scaling_expression(self, scaled_dist_vec, expn_class=None):
+        if scaled_dist_vec:
+            # the asymptotic expression has its own opinion on the dist vec
+            raise ValueError
+        if not expn_class:
+            expn_class = self._expn_class
+        if not expn_class:
+            raise ValueError(
+                "In order to generate expression, the asymptotic expansion "
+                "needs to know the expansion class.")
+        return self.asymptotics._get_scaling_at_target(expn_class)
 
     def update_persistent_hash(self, key_hash, key_builder):
         for name, value in zip(self.init_arg_names, self.__getinitargs__()):
-            if name in ["rescaled_expression", "scaling_expression"]:
+            if name in ["scaling_expression"]:
                 from pymbolic.mapper.persistent_hash import (
                     PersistentHashWalkMapper as PersistentHashWalkMapper)
                 PersistentHashWalkMapper(key_hash)(value)

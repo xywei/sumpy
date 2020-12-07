@@ -230,7 +230,7 @@ class LayerPotential(LayerPotentialBase):
                 knl = self.expansions[iknl]
 
             try:
-                sat_expr = knl.get_scaling_expression()
+                sat_expr = knl.get_scaling_expression(None)
             except AttributeError:
                 sat_expr = None
 

@@ -69,6 +69,7 @@ class P2PBase(KernelComputation, KernelCacheWrapper):
 
         from pytools import single_valued
         self.dim = single_valued(knl.dim for knl in self.kernels)
+        self._vector_names = {"d"}
 
     def get_cache_key(self):
         return (type(self).__name__, tuple(self.kernels), self.exclude_self,
@@ -95,7 +96,7 @@ class P2PBase(KernelComputation, KernelCacheWrapper):
 
         from sumpy.codegen import to_loopy_insns
         loopy_insns = to_loopy_insns(sac.assignments.items(),
-                vector_names={"d"},
+                vector_names=self._vector_names,
                 pymbolic_expr_maps=[
                         knl.get_code_transformer() for knl in self.kernels],
                 retain_names=result_names,
