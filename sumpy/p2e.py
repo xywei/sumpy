@@ -68,10 +68,10 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         expansion = expansion.with_kernel(
                 TargetDerivativeRemover()(expansion.kernel))
 
-        from sumpy.kernel import AsymptoticallyRescaledKernel
+        from sumpy.kernel import AsymptoticallyInformedKernel
         base_knl = TargetDerivativeRemover()(expansion.kernel)
         if base_knl != expansion.kernel:
-            if isinstance(base_knl, AsymptoticallyRescaledKernel):
+            if isinstance(base_knl, AsymptoticallyInformedKernel):
                 # TODO: target derivatives of scaled kernels using Leibniz's rule
                 # (fg)' = f'g + fg' ==> f' = [(fg)' - fg'] / g
                 raise ValueError(

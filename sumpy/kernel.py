@@ -1220,20 +1220,28 @@ class AsymptoticallyInformedKernel(KernelWrapper):
         self._expn_class = expn_class
 
     def get_expression(self, scaled_dist_vec, expn_class=None):
-
-        # In this special case, we allow falling back to the inner kernel
-        # to be compatible with p2p. In the meanwhile, be careful not to
-        # include the scaling into the p2p result.
+        """To get rescaled expression, pass in scaled_dist_vec = *None*.
+        """
+        # In these special cases, we allow falling back to the inner kernel
+        # to be compatible with p2p, p2e and e2p.
+        # In the meanwhile, be careful not to include the scaling into the p2p
+        # result.
         from sumpy.symbolic import make_sym_vector
+        avec = make_sym_vector("a", self.dim)
+        bvec = make_sym_vector("b", self.dim)
         dvec = make_sym_vector("d", self.dim)
-        if scaled_dist_vec == dvec:
+        if scaled_dist_vec in [dvec, bvec, avec]:
             return self.inner_kernel.get_expression(scaled_dist_vec)
 
+        # Return properly rescaled expression based on expansion class
+        assert scaled_dist_vec == avec + bvec
         if not expn_class:
             expn_class = self._expn_class
         if not expn_class:
-            # fallback to the inner kernel
-            return self.inner_kernel.get_expression(scaled_dist_vec)
+            raise ValueError(
+                "In order to generate expression, the asymptotic expansion "
+                "needs to know the expansion class.")
+
         return self.asymptotics._get_rescaled_kernel_expr(expn_class)
 
     def get_scaling_expression(self, scaled_dist_vec, expn_class=None):
@@ -1257,7 +1265,7 @@ class AsymptoticallyInformedKernel(KernelWrapper):
             else:
                 key_builder.rec(key_hash, value)
 
-    mapper_method = "map_asymptotically_rescaled_kernel"
+    mapper_method = "map_asymptotically_informed_kernel"
 
 # }}}
 
@@ -1300,7 +1308,7 @@ class KernelIdentityMapper(KernelMapper):
     map_yukawa_kernel = map_expression_kernel
     map_stokeslet_kernel = map_expression_kernel
     map_stresslet_kernel = map_expression_kernel
-    map_asymptotically_rescaled_kernel = map_expression_kernel
+    map_asymptotically_informed_kernel = map_expression_kernel
 
     def map_axis_target_derivative(self, kernel):
         return AxisTargetDerivative(kernel.axis, self.rec(kernel.inner_kernel))
@@ -1317,6 +1325,13 @@ class AxisTargetDerivativeRemover(KernelIdentityMapper):
     def map_axis_target_derivative(self, kernel):
         return self.rec(kernel.inner_kernel)
 
+    def map_asymptotically_informed_kernel(self, kernel):
+        mapped = type(kernel)(
+            self.rec(kernel.inner_kernel),
+            kernel.scaling_expression, kernel.geometric_order)
+        mapped.set_expansion_class(kernel._expn_class)
+        return mapped
+
 
 class TargetDerivativeRemover(AxisTargetDerivativeRemover):
     def map_directional_target_derivative(self, kernel):
@@ -1326,6 +1341,13 @@ class TargetDerivativeRemover(AxisTargetDerivativeRemover):
 class SourceDerivativeRemover(KernelIdentityMapper):
     def map_directional_source_derivative(self, kernel):
         return self.rec(kernel.inner_kernel)
+
+    def map_asymptotically_informed_kernel(self, kernel):
+        mapped = type(kernel)(
+            self.rec(kernel.inner_kernel),
+            kernel.scaling_expression, kernel.geometric_order)
+        mapped.set_expansion_class(kernel._expn_class)
+        return mapped
 
 
 class DerivativeCounter(KernelCombineMapper):
@@ -1341,6 +1363,7 @@ class DerivativeCounter(KernelCombineMapper):
     map_yukawa_kernel = map_expression_kernel
     map_stokeslet_kernel = map_expression_kernel
     map_stresslet_kernel = map_expression_kernel
+    map_asymptotically_informed_kernel = map_expression_kernel
 
     def map_axis_target_derivative(self, kernel):
         return 1 + self.rec(kernel.inner_kernel)
@@ -1350,7 +1373,7 @@ class DerivativeCounter(KernelCombineMapper):
 
 
 class AsymptoticScalingRemover(KernelIdentityMapper):
-    def map_asymptotically_rescaled_kernel(self, kernel):
+    def map_asymptotically_informed_kernel(self, kernel):
         return self.rec(kernel.inner_kernel)
 
 # }}}
