@@ -54,7 +54,8 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
     """
 
     def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):
-        from sumpy.kernel import DirectionalSourceDerivative
+        from sumpy.kernel import (
+            DirectionalSourceDerivative, AsymptoticallyInformedKernel)
         if kernel is None:
             kernel = self.kernel
 
@@ -63,11 +64,15 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
         if not self.use_rscale:
             rscale = 1
 
-        if isinstance(kernel, DirectionalSourceDerivative):
+        if isinstance(kernel, AsymptoticallyInformedKernel):
+            tmp_kernel = kernel.inner_kernel
+        else:
+            tmp_kernel = kernel
+
+        if isinstance(tmp_kernel, DirectionalSourceDerivative):
             from sumpy.symbolic import make_sym_vector
 
             dir_vecs = []
-            tmp_kernel = kernel
             while isinstance(tmp_kernel, DirectionalSourceDerivative):
                 dir_vecs.append(make_sym_vector(tmp_kernel.dir_vec_name, kernel.dim))
                 tmp_kernel = tmp_kernel.inner_kernel
