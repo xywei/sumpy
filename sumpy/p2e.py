@@ -73,7 +73,12 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         if base_knl != expansion.kernel:
             if isinstance(base_knl, AsymptoticallyInformedKernel):
                 # TODO: target derivatives of scaled kernels using Leibniz's rule
-                # (fg)' = f'g + fg' ==> f' = [(fg)' - fg'] / g
+                # (fg)' = f'g + fg' ==> f' = [(fg)' - fg'] / g = (fg)'/g - fg'/g,
+                # i.e.,
+                #        f' ~ QBX[(fg)']/g - QBX[fg]*g'/g^2,
+                # where
+                #        QBX[(fg)'] ~ QBX[fg]',
+                # can be computed by differentiating QBMAX local expansions.
                 raise ValueError(
                     "derivatives of scaled kernel is not currently supported.")
 

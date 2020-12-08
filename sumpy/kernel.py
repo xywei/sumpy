@@ -1234,7 +1234,6 @@ class AsymptoticallyInformedKernel(KernelWrapper):
             return self.inner_kernel.get_expression(scaled_dist_vec)
 
         # Return properly rescaled expression based on expansion class
-        assert scaled_dist_vec == avec + bvec
         if not expn_class:
             expn_class = self._expn_class
         if not expn_class:
