@@ -1141,8 +1141,7 @@ class _AsymptoticallyRescaledKernelExpressionFactory:
             return self.kernel.get_expression(avec_line)
         elif issubclass(expn_class, VolumeTaylorLocalExpansionBase):
             rad = avec + bvec
-            return self.kernel.postprocess_at_source(
-                self.kernel.get_expression(rad), avec)
+            return self.kernel.get_expression(rad)
         else:
             raise ValueError(
                 f"unsupported expansion class for QBMAX: {expn_class.__name__}")
