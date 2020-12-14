@@ -1178,15 +1178,18 @@ class AsymptoticallyInformedKernel(KernelWrapper):
     """An asymptotically informed kernel should behave the same as its inner kernel
     if the handler does not know how to take advantage of the added information.
     """
-    init_arg_names = ("inner_kernel", "scaling_expression", "geometric_order")
+    init_arg_names = ("inner_kernel", "scaling_expression", "geometric_order",
+                      "expansion_class")
 
-    def __init__(self, inner_kernel, scaling_expression, geometric_order=1):
+    def __init__(self, inner_kernel, scaling_expression, geometric_order=1,
+                 expansion_class=None):
         """
         :param inner_kernel: A raw PDE kernel being rescaled.
         :param scaling_expression: A pymbolic/sympy expression. The multiplier
             used for scaling the inner_kernel. The scaling is a function
             of "dist".
         :param geometric_order: An integer for the geometric order.
+        :param expansion_class: Expansion class to be used with the kernel.
         """
         super().__init__(inner_kernel)
 
@@ -1203,21 +1206,25 @@ class AsymptoticallyInformedKernel(KernelWrapper):
         self.asymptotics = _AsymptoticallyRescaledKernelExpressionFactory(
             inner_kernel, scaling_expression, geometric_order)
 
-        self._expn_class = None
+        self.expansion_class = expansion_class
 
     def __repr__(self):
-        return "AsymKnl[%s]" % (self.inner_kernel.__repr__(),)
+        return "AsymKnl[%s,%s]" % (self.inner_kernel.__repr__(),
+                                   repr(self.expansion_class))
 
     def __getinitargs__(self):
         return (self.inner_kernel, self.scaling_expression,
-                self.geometric_order)
+                self.geometric_order, self.expansion_class)
 
     def replace_inner_kernel(self, new_inner_kernel):
         return type(self)(new_inner_kernel,
-                          self.scaling_expression, self.geometric_order)
+                          self.scaling_expression, self.geometric_order,
+                          self.expansion_class)
 
-    def set_expansion_class(self, expn_class):
-        self._expn_class = expn_class
+    def replace_expansion_class(self, expn_class):
+        return type(self)(self.inner_kernel,
+                          self.scaling_expression, self.geometric_order,
+                          expn_class)
 
     def get_expression(self, scaled_dist_vec, expn_class=None):
         """To get rescaled expression, pass in scaled_dist_vec = *None*.
@@ -1235,7 +1242,7 @@ class AsymptoticallyInformedKernel(KernelWrapper):
 
         # Return properly rescaled expression based on expansion class
         if not expn_class:
-            expn_class = self._expn_class
+            expn_class = self.expansion_class
         if not expn_class:
             raise ValueError(
                 "In order to generate expression, the asymptotic expansion "
@@ -1248,7 +1255,7 @@ class AsymptoticallyInformedKernel(KernelWrapper):
             # the asymptotic expression has its own opinion on the dist vec
             raise ValueError
         if not expn_class:
-            expn_class = self._expn_class
+            expn_class = self.expansion_class
         if not expn_class:
             raise ValueError(
                 "In order to generate expression, the asymptotic expansion "
@@ -1327,8 +1334,8 @@ class AxisTargetDerivativeRemover(KernelIdentityMapper):
     def map_asymptotically_informed_kernel(self, kernel):
         mapped = type(kernel)(
             self.rec(kernel.inner_kernel),
-            kernel.scaling_expression, kernel.geometric_order)
-        mapped.set_expansion_class(kernel._expn_class)
+            kernel.scaling_expression, kernel.geometric_order,
+            kernel.expansion_class)
         return mapped
 
 
@@ -1344,8 +1351,8 @@ class SourceDerivativeRemover(KernelIdentityMapper):
     def map_asymptotically_informed_kernel(self, kernel):
         mapped = type(kernel)(
             self.rec(kernel.inner_kernel),
-            kernel.scaling_expression, kernel.geometric_order)
-        mapped.set_expansion_class(kernel._expn_class)
+            kernel.scaling_expression, kernel.geometric_order,
+            kernel.expansion_class)
         return mapped
 
 
@@ -1374,6 +1381,16 @@ class DerivativeCounter(KernelCombineMapper):
 class AsymptoticScalingRemover(KernelIdentityMapper):
     def map_asymptotically_informed_kernel(self, kernel):
         return self.rec(kernel.inner_kernel)
+
+
+class ExpaniosnClassReplacer(KernelIdentityMapper):
+    def __init__(self, expansion_class):
+        self.expansion_class = expansion_class
+
+    def map_asymptotically_informed_kernel(self, kernel):
+        mapped = kernel.replace_expansion_class(self.expansion_class)
+        mapped_inner = self.rec(kernel.inner_kernel)
+        return mapped.replace_inner_kernel(mapped_inner)
 
 # }}}
 
