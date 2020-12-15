@@ -1268,6 +1268,8 @@ class AsymptoticallyInformedKernel(KernelWrapper):
                 from pymbolic.mapper.persistent_hash import (
                     PersistentHashWalkMapper as PersistentHashWalkMapper)
                 PersistentHashWalkMapper(key_hash)(value)
+            elif name in ["expansion_class"]:
+                key_builder.rec(key_hash, repr(value))
             else:
                 key_builder.rec(key_hash, value)
 
