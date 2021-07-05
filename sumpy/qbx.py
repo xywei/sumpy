@@ -240,24 +240,13 @@ class LayerPotential(LayerPotentialBase):
                 None, shape="ntargets", order="C")
             for i in range(len(self.target_kernels))])
 
-        # "expansions" = kernels
         sats = []
         sat_insns_data = []
-        for iknl in range(len(self.kernels)):
-
-            from sumpy.expansion import ExpansionBase
-            if isinstance(self.expansions[iknl], ExpansionBase):
-                knl = self.expansions[iknl].kernel
-            else:
-                from sumpy.kernel import Kernel
-                assert isinstance(self.expansions[iknl], Kernel)
-                knl = self.expansions[iknl]
-
+        for iknl, knl in enumerate(self.target_kernels):
             try:
                 sat_expr = knl.get_scaling_expression(None)
             except AttributeError:
                 sat_expr = None
-
             if sat_expr:
                 # inject the multiplicative scales of each output kernel
                 sats.append(f"sat_{iknl} * ")
@@ -272,7 +261,7 @@ class LayerPotential(LayerPotentialBase):
                     vector_names=self._vector_names,
                     pymbolic_expr_maps=[
                         expn.kernel.get_code_transformer()
-                        for expn in self.expansions],
+                        for expn in self.target_kernels],
                     retain_names=[datpair[0] for datpair in sat_insns_data],
                     complex_dtype=np.complex128)  # FIXME
         else:
