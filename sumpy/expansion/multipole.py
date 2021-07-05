@@ -22,12 +22,10 @@ THE SOFTWARE.
 
 import sumpy.symbolic as sym  # noqa
 
-from sumpy.symbolic import vector_xreplace
 from sumpy.expansion import (
-    ExpansionBase, VolumeTaylorExpansion, LaplaceConformingVolumeTaylorExpansion,
-    HelmholtzConformingVolumeTaylorExpansion,
-    BiharmonicConformingVolumeTaylorExpansion)
-from pytools import cartesian_product
+    ExpansionBase, VolumeTaylorExpansion, LinearPDEConformingVolumeTaylorExpansion)
+from pytools import factorial
+from sumpy.tools import mi_set_axis, add_to_sac
 
 import logging
 logger = logging.getLogger(__name__)
@@ -53,102 +51,57 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
     Coefficients represent the terms in front of the kernel derivatives.
     """
 
-    def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):
-        from sumpy.kernel import (
+    def coefficients_from_source_vec(self, kernels, avec, bvec, rscale, weights,
+            sac=None):
+        """This method calculates the full coefficients, sums them up and
+        compresses them. This is more efficient that calculating full
+        coefficients, compressing and then summing.
+        """
+        from sumpy.kernel import (KernelWrapper,
             DirectionalSourceDerivative, AsymptoticallyInformedKernel)
-        if kernel is None:
-            kernel = self.kernel
-
         from sumpy.tools import mi_power, mi_factorial
 
         if not self.use_rscale:
             rscale = 1
 
-        if isinstance(kernel, AsymptoticallyInformedKernel):
-            tmp_kernel = kernel.inner_kernel
-        else:
-            tmp_kernel = kernel
+        result = [0]*len(self.get_full_coefficient_identifiers())
+        for kernel, weight in zip(kernels, weights):
+            if isinstance(kernel, KernelWrapper):
+                coeffs = [
+                        kernel.postprocess_at_source(mi_power(avec, mi), avec)
+                        / rscale ** sum(mi)
+                        for mi in self.get_full_coefficient_identifiers()]
+            else:
+                avec_scaled = [sym.UnevaluatedExpr(a * rscale**-1) for a in avec]
+                coeffs = [mi_power(avec_scaled, mi)
+                          for mi in self.get_full_coefficient_identifiers()]
 
-        if isinstance(tmp_kernel, DirectionalSourceDerivative):
-            from sumpy.symbolic import make_sym_vector
-
-            dir_vecs = []
-            while isinstance(tmp_kernel, DirectionalSourceDerivative):
-                dir_vecs.append(make_sym_vector(tmp_kernel.dir_vec_name, kernel.dim))
-                tmp_kernel = tmp_kernel.inner_kernel
-
-            if kernel.get_base_kernel() is not tmp_kernel:
-                raise NotImplementedError("Unknown kernel wrapper.")
-
-            nderivs = len(dir_vecs)
-
-            coeff_identifiers = self.get_full_coefficient_identifiers()
-            result = [0] * len(coeff_identifiers)
-
-            for i, mi in enumerate(coeff_identifiers):
-                # One source derivative is the dot product of the gradient and
-                # directional vector.
-                # For multiple derivatives, gradient of gradients is taken.
-                # For eg: in 3D, 2 source derivatives gives 9 terms and
-                # cartesian_product below enumerates these 9 terms.
-                for deriv_terms in cartesian_product(*[range(kernel.dim)]*nderivs):
-                    prod = 1
-                    derivative_mi = list(mi)
-                    for nderivative, deriv_dim in enumerate(deriv_terms):
-                        prod *= -derivative_mi[deriv_dim]
-                        prod *= dir_vecs[nderivative][deriv_dim]
-                        derivative_mi[deriv_dim] -= 1
-                    if any(v < 0 for v in derivative_mi):
-                        continue
-                    result[i] += mi_power(avec, derivative_mi) * prod
-
-            for i, mi in enumerate(coeff_identifiers):
-                result[i] /= (mi_factorial(mi) * rscale ** sum(mi))
-        else:
-            avec = [sym.UnevaluatedExpr(a * rscale**-1) for a in avec]
-
-            result = [
-                    mi_power(avec, mi) / mi_factorial(mi)
-                    for mi in self.get_full_coefficient_identifiers()]
+            for i, mi in enumerate(self.get_full_coefficient_identifiers()):
+                result[i] += coeffs[i] * weight / mi_factorial(mi)
         return (
             self.expansion_terms_wrangler.get_stored_mpole_coefficients_from_full(
                 result, rscale, sac=sac))
 
-    def get_scaled_multipole(self, expr, bvec, rscale, nderivatives,
-            nderivatives_for_scaling=None):
-        if nderivatives_for_scaling is None:
-            nderivatives_for_scaling = nderivatives
+    def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):
+        return self.coefficients_from_source_vec((kernel,), avec, bvec,
+                rscale, (1,), sac=sac)
 
-        if self.kernel.has_efficient_scale_adjustment:
-            return (
-                    self.kernel.adjust_for_kernel_scaling(
-                        vector_xreplace(
-                            expr,
-                            bvec, bvec * rscale**-1),
-                        rscale, nderivatives)
-                    / rscale ** (nderivatives - nderivatives_for_scaling))
-        else:
-            return (rscale**nderivatives_for_scaling * expr)
-
-    def evaluate(self, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
         if not self.use_rscale:
             rscale = 1
 
-        taker = self.get_kernel_derivative_taker(bvec)
+        base_taker = kernel.get_derivative_taker(bvec, rscale, sac)
+        taker = kernel.postprocess_at_target(base_taker, bvec)
 
-        result = sym.Add(*tuple(
-                coeff
-                * self.get_scaled_multipole(taker.diff(mi), bvec, rscale, sum(mi))
-                for coeff, mi in zip(coeffs, self.get_coefficient_identifiers())))
+        result = []
+        for coeff, mi in zip(coeffs, self.get_coefficient_identifiers()):
+            result.append(coeff * taker.diff(mi, lambda x: add_to_sac(sac, x)))
 
+        result = sym.Add(*tuple(result))
         return result
 
-    def get_kernel_derivative_taker(self, bvec):
-        from sumpy.tools import MiDerivativeTaker
-        return MiDerivativeTaker(self.kernel.get_expression(bvec), bvec)
-
     def translate_from(self, src_expansion, src_coeff_exprs, src_rscale,
-            dvec, tgt_rscale, sac=None):
+            dvec, tgt_rscale, sac=None, _fast_version=True):
         if not isinstance(src_expansion, type(self)):
             raise RuntimeError("do not know how to translate %s to "
                     "Taylor multipole expansion"
@@ -158,8 +111,9 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
             src_rscale = 1
             tgt_rscale = 1
 
-        logger.info("building translation operator: %s(%d) -> %s(%d): start"
-                % (type(src_expansion).__name__,
+        logger.info("building translation operator for %s: %s(%d) -> %s(%d): start"
+                % (src_expansion.kernel,
+                    type(src_expansion).__name__,
                     src_expansion.order,
                     type(self).__name__,
                     self.order))
@@ -172,67 +126,209 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
         tgt_mi_to_index = {mi: i for i, mi in enumerate(
             self.get_full_coefficient_identifiers())}
 
-        src_coeff_exprs = list(src_coeff_exprs)
-        for i, mi in enumerate(src_expansion.get_coefficient_identifiers()):
-            src_coeff_exprs[i] *= sym.UnevaluatedExpr(src_rscale/tgt_rscale)**sum(mi)
-
-        result = [0] * len(self.get_full_coefficient_identifiers())
-
         # This algorithm uses the observation that M2M coefficients
         # have the following form in 2D
         #
-        # $B_{m, n} = \sum_{i\le m, j\le n} A_{i, j}
+        # $T_{m, n} = \sum_{i\le m, j\le n} C_{i, j}
         #             d_x^i d_y^j \binom{m}{i} \binom{n}{j}$
         # and can be rewritten as follows.
         #
-        # Let $T_{m, n} = \sum_{i\le m} A_{i, n} d_x^i \binom{m}{i}$.
+        # Let $Y_{m, n} = \sum_{i\le m} C_{i, n} d_x^i \binom{m}{i}$.
         #
-        # Then, $B_{m, n} = \sum_{j\le n} T_{m, j} d_y^j \binom{n}{j}$.
+        # Then, $T_{m, n} = \sum_{j\le n} Y_{m, j} d_y^j \binom{n}{j}$.
         #
-        # $T_{m, n}$ are $p^2$ number of temporary variables that are
+        # $Y_{m, n}$ are $p^2$ temporary variables that are
         # reused for different M2M coefficients and costs $p$ per variable.
-        # Total cost for calculating $T_{m, n}$ is $p^3$ and similar
-        # for $B_{m, n}$
+        # Total cost for calculating $Y_{m, n}$ is $p^3$ and similar
+        # for $T_{m, n}$. For compressed Taylor series this can be done
+        # more efficiently.
 
+        # Let's take the example u_xy + u_x + u_y = 0.
+        # In the diagram below, C depicts a non zero source coefficient.
+        # We divide these into two hyperplanes.
+        #
+        #  C              C             0
+        #  C 0            C 0           0 0
+        #  C 0 0       =  C 0 0      +  0 0 0
+        #  C 0 0 0        C 0 0 0       0 0 0 0
+        #  C C C C C      C 0 0 0 0     0 C C C C
+        #
+        # The calculations done when naively translating first hyperplane of the
+        # source coefficients (C) to target coefficients (T) are shown
+        # below in the graph. Each connection represents a O(1) calculation,
+        # and the arrows go "up and to the right".
+        #
+        #  ┌─→C             T
+        #  │  ↑
+        #  │┌→C→0←─────┐->  T T
+        #  ││ ↑ ↑      │
+        #  ││ ┌─┘┌────┐│
+        #  ││↱C→0↲0←─┐││    T T T
+        #  │││└───⬏  │││
+        #  └└└C→0 0 0│││    T T T T
+        #     └───⬏ ↑│││
+        #     └─────┘│││
+        #     └──────┘││
+        #     └───────┘│
+        #     └────────┘
+        #
+        # By using temporaries (Y), this can be reduced as shown below.
+        #
+        #  ┌→C           Y             T
+        #  │ ↑
+        #  │↱C 0     ->  Y→0       ->  T T
+        #  ││↑
+        #  ││C 0 0       Y→0 0         T T T
+        #  ││↑           └───⬏
+        #  └└C 0 0 0     Y 0 0 0       T T T T
+        #                └───⬏ ↑
+        #                └─────┘
+        #
+        # Note that in the above calculation data is propagated upwards
+        # in the first pass and then rightwards in the second pass.
+        # Data propagation with zeros are not shown as they are not calculated.
+        # If the propagation was done rightwards first and upwards second
+        # number of calculations are higher as shown below.
+        #
+        #    C             ┌→Y           T
+        #                  │ ↑
+        #    C→0       ->  │↱Y↱Y     ->  T T
+        #                  ││↑│↑
+        #    C→0 0         ││Y│Y Y       T T T
+        #    └───⬏         ││↑│↑ ↑
+        #    C→0 0 0       └└Y└Y Y Y     T T T T
+        #    └───⬏ ↑
+        #    └─────┘
+        #
+        # For the second hyperplane, data is propogated rightwards first
+        # and then upwards second which is opposite to that of the first
+        # hyperplane.
+        #
+        #    0              0            0
+        #
+        #    0 0       ->   0↱0      ->  0 T
+        #                    │↑
+        #    0 0 0          0│0 0        0 T T
+        #                    │↑ ↑
+        #    0 C→C→C        0└Y Y Y      0 T T T
+        #      └───⬏
+        #
         # In other words, we're better off computing the translation
-        # one dimension at a time. This is realized here by using
-        # the output from one dimension as the input to the next.
-        # per_dim_coeffs_to_translate serves as the array of input
-        # coefficients for each dimension's translation.
+        # one dimension at a time. If the coefficient-identifying multi-indices
+        # in the source expansion have the form (0, m) and (n, 0), where m>=0, n>=1,
+        # then we calculate the output from (0, m) with the second
+        # dimension as the fastest varying dimension and then calculate
+        # the output from (n, 0) with the first dimension as the fastest
+        # varying dimension.
 
-        dim_coeffs_to_translate = src_coeff_exprs
+        tgt_hyperplanes = \
+            self.expansion_terms_wrangler._split_coeffs_into_hyperplanes()
+        result = [0] * len(self.get_full_coefficient_identifiers())
 
-        mi_to_index = src_mi_to_index
-        for d in range(self.dim):
+        # axis morally iterates over 'hyperplane directions'
+        for axis in range(self.dim):
+            # {{{ index gymnastics
+
+            # First, let's write source coefficients in target coefficient
+            # indices. If target order is lower than source order, then
+            # we will discard higher order terms from source coefficients.
+            cur_dim_input_coeffs = \
+                [0] * len(self.get_full_coefficient_identifiers())
+            for d, mis in tgt_hyperplanes:
+                # Only consider hyperplanes perpendicular to *axis*.
+                if d != axis:
+                    continue
+                for mi in mis:
+                    # When target order is higher than source order, we assume
+                    # that the higher order source coefficients were zero.
+                    if mi not in src_mi_to_index:
+                        continue
+
+                    src_idx = src_mi_to_index[mi]
+                    tgt_idx = tgt_mi_to_index[mi]
+                    cur_dim_input_coeffs[tgt_idx] = src_coeff_exprs[src_idx] * \
+                            sym.UnevaluatedExpr(src_rscale/tgt_rscale)**sum(mi)
+
+            if all(coeff == 0 for coeff in cur_dim_input_coeffs):
+                continue
+
+            # }}}
+
+            # {{{ translation
+
+            # As explained above using the unicode art, we use the orthogonal axis
+            # as the last dimension to vary to reduce the number of operations.
+            dims = list(range(axis)) + \
+                   list(range(axis+1, self.dim)) + [axis]
+
+            # d is the axis along which we translate.
+            for d in dims:
+                # We build the full target multipole and then compress it
+                # at the very end.
+                cur_dim_output_coeffs = \
+                    [0] * len(self.get_full_coefficient_identifiers())
+                for i, tgt_mi in enumerate(
+                        self.get_full_coefficient_identifiers()):
+
+                    # Calling this input_mis instead of src_mis because we
+                    # converted the source coefficients to target coefficient
+                    # indices beforehand.
+                    for mi_i in range(tgt_mi[d]+1):
+                        input_mi = mi_set_axis(tgt_mi, d, mi_i)
+                        contrib = cur_dim_input_coeffs[tgt_mi_to_index[input_mi]]
+                        for n, k, dist in zip(tgt_mi, input_mi, dvec):
+                            assert n >= k
+                            contrib /= factorial(n-k)
+                            contrib *= \
+                                sym.UnevaluatedExpr(dist/tgt_rscale)**(n-k)
+
+                        cur_dim_output_coeffs[i] += contrib
+                # cur_dim_output_coeffs is the input in the next iteration
+                cur_dim_input_coeffs = cur_dim_output_coeffs
+
+            # }}}
+
+            for i in range(len(cur_dim_output_coeffs)):
+                result[i] += cur_dim_output_coeffs[i]
+
+        # {{{ simpler, functionally equivalent code
+        if not _fast_version:
+            src_mi_to_index = dict((mi, i) for i, mi in enumerate(
+                src_expansion.get_coefficient_identifiers()))
             result = [0] * len(self.get_full_coefficient_identifiers())
+
+            for i, mi in enumerate(src_expansion.get_coefficient_identifiers()):
+                src_coeff_exprs[i] *= mi_factorial(mi)
+
+            from pytools import generate_nonnegative_integer_tuples_below as gnitb
+
             for i, tgt_mi in enumerate(
                     self.get_full_coefficient_identifiers()):
 
-                src_mis_per_dim = []
-                for mi_i in range(tgt_mi[d]+1):
-                    new_mi = list(tgt_mi)
-                    new_mi[d] = mi_i
-                    src_mis_per_dim.append(tuple(new_mi))
+                tgt_mi_plus_one = tuple(mi_i + 1 for mi_i in tgt_mi)
 
-                for src_mi in src_mis_per_dim:
+                for src_mi in gnitb(tgt_mi_plus_one):
                     try:
-                        src_index = mi_to_index[src_mi]
+                        src_index = src_mi_to_index[src_mi]
                     except KeyError:
                         # Omitted coefficients: not life-threatening
                         continue
 
-                    contrib = dim_coeffs_to_translate[src_index]
+                    contrib = src_coeff_exprs[src_index]
+
                     for idim in range(self.dim):
                         n = tgt_mi[idim]
                         k = src_mi[idim]
                         assert n >= k
-                        contrib /= mi_factorial((n-k,))
-                        contrib *= sym.UnevaluatedExpr(dvec[idim]/tgt_rscale)**(n-k)
+                        from sympy import binomial
+                        contrib *= (binomial(n, k)
+                                * sym.UnevaluatedExpr(dvec[idim]/tgt_rscale)**(n-k))
 
-                    result[i] += contrib
+                    result[i] += (contrib
+                        * sym.UnevaluatedExpr(src_rscale/tgt_rscale)**sum(src_mi))
 
-            dim_coeffs_to_translate = result[:]
-            mi_to_index = tgt_mi_to_index
+                result[i] /= mi_factorial(tgt_mi)
+        # }}}
 
         logger.info("building translation operator: done")
         return (
@@ -249,34 +345,47 @@ class VolumeTaylorMultipoleExpansion(
         VolumeTaylorExpansion.__init__(self, kernel, order, use_rscale)
 
 
-class LaplaceConformingVolumeTaylorMultipoleExpansion(
-        LaplaceConformingVolumeTaylorExpansion,
+class LinearPDEConformingVolumeTaylorMultipoleExpansion(
+        LinearPDEConformingVolumeTaylorExpansion,
         VolumeTaylorMultipoleExpansionBase):
 
     def __init__(self, kernel, order, use_rscale=None):
         VolumeTaylorMultipoleExpansionBase.__init__(self, kernel, order, use_rscale)
-        LaplaceConformingVolumeTaylorExpansion.__init__(
+        LinearPDEConformingVolumeTaylorExpansion.__init__(
                 self, kernel, order, use_rscale)
+
+
+class LaplaceConformingVolumeTaylorMultipoleExpansion(
+        LinearPDEConformingVolumeTaylorMultipoleExpansion):
+
+    def __init__(self, *args, **kwargs):
+        from warnings import warn
+        warn("LaplaceConformingVolumeTaylorMultipoleExpansion is deprecated. "
+             "Use LinearPDEConformingVolumeTaylorMultipoleExpansion instead.",
+                DeprecationWarning, stacklevel=2)
+        super().__init__(*args, **kwargs)
 
 
 class HelmholtzConformingVolumeTaylorMultipoleExpansion(
-        HelmholtzConformingVolumeTaylorExpansion,
-        VolumeTaylorMultipoleExpansionBase):
+        LinearPDEConformingVolumeTaylorMultipoleExpansion):
 
-    def __init__(self, kernel, order, use_rscale=None):
-        VolumeTaylorMultipoleExpansionBase.__init__(self, kernel, order, use_rscale)
-        HelmholtzConformingVolumeTaylorExpansion.__init__(
-                self, kernel, order, use_rscale)
+    def __init__(self, *args, **kwargs):
+        from warnings import warn
+        warn("HelmholtzConformingVolumeTaylorMultipoleExpansion is deprecated. "
+             "Use LinearPDEConformingVolumeTaylorMultipoleExpansion instead.",
+                DeprecationWarning, stacklevel=2)
+        super().__init__(*args, **kwargs)
 
 
 class BiharmonicConformingVolumeTaylorMultipoleExpansion(
-        BiharmonicConformingVolumeTaylorExpansion,
-        VolumeTaylorMultipoleExpansionBase):
+        LinearPDEConformingVolumeTaylorMultipoleExpansion):
 
-    def __init__(self, kernel, order, use_rscale=None):
-        VolumeTaylorMultipoleExpansionBase.__init__(self, kernel, order, use_rscale)
-        BiharmonicConformingVolumeTaylorExpansion.__init__(
-                self, kernel, order, use_rscale)
+    def __init__(self, *args, **kwargs):
+        from warnings import warn
+        warn("BiharmonicConformingVolumeTaylorMultipoleExpansion is deprecated. "
+             "Use LinearPDEConformingVolumeTaylorMultipoleExpansion instead.",
+                DeprecationWarning, stacklevel=2)
+        super().__init__(*args, **kwargs)
 
 # }}}
 
@@ -297,8 +406,7 @@ class _HankelBased2DMultipoleExpansion(MultipoleExpansionBase):
         if kernel is None:
             kernel = self.kernel
 
-        from sumpy.symbolic import sym_real_norm_2
-        bessel_j = sym.Function("bessel_j")
+        from sumpy.symbolic import sym_real_norm_2, BesselJ
         avec_len = sym_real_norm_2(avec)
 
         arg_scale = self.get_bessel_arg_scaling()
@@ -307,26 +415,25 @@ class _HankelBased2DMultipoleExpansion(MultipoleExpansionBase):
         source_angle_rel_center = sym.atan2(-avec[1], -avec[0])
         return [
                 kernel.postprocess_at_source(
-                    bessel_j(c, arg_scale * avec_len)
+                    BesselJ(c, arg_scale * avec_len, 0)
                     / rscale ** abs(c)
                     * sym.exp(sym.I * c * -source_angle_rel_center),
                     avec)
                 for c in self.get_coefficient_identifiers()]
 
-    def evaluate(self, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
         if not self.use_rscale:
             rscale = 1
 
-        from sumpy.symbolic import sym_real_norm_2
-        hankel_1 = sym.Function("hankel_1")
+        from sumpy.symbolic import sym_real_norm_2, Hankel1
         bvec_len = sym_real_norm_2(bvec)
         target_angle_rel_center = sym.atan2(bvec[1], bvec[0])
 
         arg_scale = self.get_bessel_arg_scaling()
 
         return sum(coeffs[self.get_storage_index(c)]
-                   * self.kernel.postprocess_at_target(
-                       hankel_1(c, arg_scale * bvec_len)
+                   * kernel.postprocess_at_target(
+                       Hankel1(c, arg_scale * bvec_len, 0)
                        * rscale ** abs(c)
                        * sym.exp(sym.I * c * target_angle_rel_center), bvec)
                 for c in self.get_coefficient_identifiers())
@@ -342,9 +449,8 @@ class _HankelBased2DMultipoleExpansion(MultipoleExpansionBase):
             src_rscale = 1
             tgt_rscale = 1
 
-        from sumpy.symbolic import sym_real_norm_2
+        from sumpy.symbolic import sym_real_norm_2, BesselJ
         dvec_len = sym_real_norm_2(dvec)
-        bessel_j = sym.Function("bessel_j")
         new_center_angle_rel_old_center = sym.atan2(dvec[1], dvec[0])
 
         arg_scale = self.get_bessel_arg_scaling()
@@ -353,7 +459,7 @@ class _HankelBased2DMultipoleExpansion(MultipoleExpansionBase):
         for j in self.get_coefficient_identifiers():
             translated_coeffs.append(
                 sum(src_coeff_exprs[src_expansion.get_storage_index(m)]
-                    * bessel_j(m - j, arg_scale * dvec_len)
+                    * BesselJ(m - j, arg_scale * dvec_len, 0)
                     * src_rscale ** abs(m)
                     / tgt_rscale ** abs(j)
                     * sym.exp(sym.I * (m - j) * new_center_angle_rel_old_center)

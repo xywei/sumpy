@@ -32,16 +32,13 @@ from pyopencl.tools import (  # noqa
 from sumpy.expansion.multipole import (
         VolumeTaylorMultipoleExpansion, H2DMultipoleExpansion,
         VolumeTaylorMultipoleExpansionBase,
-        LaplaceConformingVolumeTaylorMultipoleExpansion,
-        HelmholtzConformingVolumeTaylorMultipoleExpansion,
-        BiharmonicConformingVolumeTaylorMultipoleExpansion)
+        LinearPDEConformingVolumeTaylorMultipoleExpansion)
 from sumpy.expansion.local import (
         VolumeTaylorLocalExpansion, H2DLocalExpansion,
-        LaplaceConformingVolumeTaylorLocalExpansion,
-        HelmholtzConformingVolumeTaylorLocalExpansion,
-        BiharmonicConformingVolumeTaylorLocalExpansion)
+        LinearPDEConformingVolumeTaylorLocalExpansion)
 from sumpy.kernel import (LaplaceKernel, HelmholtzKernel, AxisTargetDerivative,
         DirectionalSourceDerivative, BiharmonicKernel, StokesletKernel)
+import sumpy.symbolic as sym
 from pytools.convergence import PConvergenceVerifier
 
 import logging
@@ -106,8 +103,8 @@ def test_p2p(ctx_factory, exclude_self):
 
 
 @pytest.mark.parametrize(("base_knl", "expn_class"), [
-    (LaplaceKernel(2), LaplaceConformingVolumeTaylorLocalExpansion),
-    (LaplaceKernel(2), LaplaceConformingVolumeTaylorMultipoleExpansion),
+    (LaplaceKernel(2), LinearPDEConformingVolumeTaylorLocalExpansion),
+    (LaplaceKernel(2), LinearPDEConformingVolumeTaylorMultipoleExpansion),
 ])
 def test_p2e_multiple(ctx_factory, base_knl, expn_class):
 
@@ -131,7 +128,7 @@ def test_p2e_multiple(ctx_factory, base_knl, expn_class):
     if isinstance(base_knl, StokesletKernel):
         extra_kwargs["mu"] = 0.2
 
-    in_kernels = [
+    source_kernels = [
         DirectionalSourceDerivative(base_knl, "dir_vec"),
         base_knl,
     ]
@@ -169,7 +166,7 @@ def test_p2e_multiple(ctx_factory, base_knl, expn_class):
     rscale = 0.5  # pick something non-1
 
     # apply p2e at the same time
-    p2e = P2EFromSingleBox(ctx, expn, kernels=in_kernels, strength_usage=[0, 1])
+    p2e = P2EFromSingleBox(ctx, expn, kernels=source_kernels, strength_usage=[0, 1])
     evt, (mpoles,) = p2e(queue,
             source_boxes=source_boxes,
             box_source_starts=box_source_starts,
@@ -190,11 +187,12 @@ def test_p2e_multiple(ctx_factory, base_knl, expn_class):
 
     # apply p2e separately
     expected_result = np.zeros_like(actual_result)
-    for i, in_kernel in enumerate(in_kernels):
+    for i, source_kernel in enumerate(source_kernels):
         extra_source_kwargs = extra_kwargs.copy()
-        if isinstance(in_kernel, DirectionalSourceDerivative):
+        if isinstance(source_kernel, DirectionalSourceDerivative):
             extra_source_kwargs["dir_vec"] = dir_vec
-        p2e = P2EFromSingleBox(ctx, expn, kernels=[in_kernel], strength_usage=[i])
+        p2e = P2EFromSingleBox(ctx, expn,
+            kernels=[source_kernel], strength_usage=[i])
         evt, (mpoles,) = p2e(queue,
             source_boxes=source_boxes,
             box_source_starts=box_source_starts,
@@ -218,13 +216,13 @@ def test_p2e_multiple(ctx_factory, base_knl, expn_class):
 @pytest.mark.parametrize(("base_knl", "expn_class"), [
     (LaplaceKernel(2), VolumeTaylorLocalExpansion),
     (LaplaceKernel(2), VolumeTaylorMultipoleExpansion),
-    (LaplaceKernel(2), LaplaceConformingVolumeTaylorLocalExpansion),
-    (LaplaceKernel(2), LaplaceConformingVolumeTaylorMultipoleExpansion),
+    (LaplaceKernel(2), LinearPDEConformingVolumeTaylorLocalExpansion),
+    (LaplaceKernel(2), LinearPDEConformingVolumeTaylorMultipoleExpansion),
 
     (HelmholtzKernel(2), VolumeTaylorMultipoleExpansion),
     (HelmholtzKernel(2), VolumeTaylorLocalExpansion),
-    (HelmholtzKernel(2), HelmholtzConformingVolumeTaylorLocalExpansion),
-    (HelmholtzKernel(2), HelmholtzConformingVolumeTaylorMultipoleExpansion),
+    (HelmholtzKernel(2), LinearPDEConformingVolumeTaylorLocalExpansion),
+    (HelmholtzKernel(2), LinearPDEConformingVolumeTaylorMultipoleExpansion),
     (HelmholtzKernel(2), H2DLocalExpansion),
     (HelmholtzKernel(2), H2DMultipoleExpansion),
 
@@ -236,9 +234,9 @@ def test_p2e_multiple(ctx_factory, base_knl, expn_class):
     (HelmholtzKernel(2, allow_evanescent=True), VolumeTaylorMultipoleExpansion),
     (HelmholtzKernel(2, allow_evanescent=True), VolumeTaylorLocalExpansion),
     (HelmholtzKernel(2, allow_evanescent=True),
-     HelmholtzConformingVolumeTaylorLocalExpansion),
+     LinearPDEConformingVolumeTaylorLocalExpansion),
     (HelmholtzKernel(2, allow_evanescent=True),
-     HelmholtzConformingVolumeTaylorMultipoleExpansion),
+     LinearPDEConformingVolumeTaylorMultipoleExpansion),
     (HelmholtzKernel(2, allow_evanescent=True), H2DLocalExpansion),
     (HelmholtzKernel(2, allow_evanescent=True), H2DMultipoleExpansion),
     ])
@@ -275,7 +273,7 @@ def test_p2e2p(ctx_factory, base_knl, expn_class, order, with_source_derivative)
     else:
         knl = base_knl
 
-    out_kernels = [
+    target_kernels = [
             knl,
             AxisTargetDerivative(0, knl),
             ]
@@ -283,8 +281,8 @@ def test_p2e2p(ctx_factory, base_knl, expn_class, order, with_source_derivative)
 
     from sumpy import P2EFromSingleBox, E2PFromSingleBox, P2P
     p2e = P2EFromSingleBox(ctx, expn, kernels=[knl])
-    e2p = E2PFromSingleBox(ctx, expn, kernels=out_kernels)
-    p2p = P2P(ctx, out_kernels, exclude_self=False)
+    e2p = E2PFromSingleBox(ctx, expn, kernels=target_kernels)
+    p2p = P2P(ctx, target_kernels, exclude_self=False)
 
     from pytools.convergence import EOCRecorder
     eoc_rec_pot = EOCRecorder()
@@ -455,16 +453,16 @@ def test_p2e2p(ctx_factory, base_knl, expn_class, order, with_source_derivative)
 
 @pytest.mark.parametrize("knl, local_expn_class, mpole_expn_class", [
     (LaplaceKernel(2), VolumeTaylorLocalExpansion, VolumeTaylorMultipoleExpansion),
-    (LaplaceKernel(2), LaplaceConformingVolumeTaylorLocalExpansion,
-     LaplaceConformingVolumeTaylorMultipoleExpansion),
+    (LaplaceKernel(2), LinearPDEConformingVolumeTaylorLocalExpansion,
+     LinearPDEConformingVolumeTaylorMultipoleExpansion),
     (HelmholtzKernel(2), VolumeTaylorLocalExpansion, VolumeTaylorMultipoleExpansion),
-    (HelmholtzKernel(2), HelmholtzConformingVolumeTaylorLocalExpansion,
-     HelmholtzConformingVolumeTaylorMultipoleExpansion),
+    (HelmholtzKernel(2), LinearPDEConformingVolumeTaylorLocalExpansion,
+     LinearPDEConformingVolumeTaylorMultipoleExpansion),
     (HelmholtzKernel(2), H2DLocalExpansion, H2DMultipoleExpansion),
     (StokesletKernel(2, 0, 0), VolumeTaylorLocalExpansion,
      VolumeTaylorMultipoleExpansion),
-    (StokesletKernel(2, 0, 0), BiharmonicConformingVolumeTaylorLocalExpansion,
-     BiharmonicConformingVolumeTaylorMultipoleExpansion),
+    (StokesletKernel(2, 0, 0), LinearPDEConformingVolumeTaylorLocalExpansion,
+     LinearPDEConformingVolumeTaylorMultipoleExpansion),
     ])
 def test_translations(ctx_factory, knl, local_expn_class, mpole_expn_class):
     logging.basicConfig(level=logging.INFO)
@@ -480,7 +478,7 @@ def test_translations(ctx_factory, knl, local_expn_class, mpole_expn_class):
     res = 20
     nsources = 15
 
-    out_kernels = [knl]
+    target_kernels = [knl]
 
     extra_kwargs = {}
     if isinstance(knl, HelmholtzKernel):
@@ -566,11 +564,11 @@ def test_translations(ctx_factory, knl, local_expn_class, mpole_expn_class):
         from sumpy import P2EFromSingleBox, E2PFromSingleBox, P2P, E2EFromCSR
         p2m = P2EFromSingleBox(ctx, m_expn)
         m2m = E2EFromCSR(ctx, m_expn, m_expn)
-        m2p = E2PFromSingleBox(ctx, m_expn, out_kernels)
+        m2p = E2PFromSingleBox(ctx, m_expn, target_kernels)
         m2l = E2EFromCSR(ctx, m_expn, l_expn)
         l2l = E2EFromCSR(ctx, l_expn, l_expn)
-        l2p = E2PFromSingleBox(ctx, l_expn, out_kernels)
-        p2p = P2P(ctx, out_kernels, exclude_self=False)
+        l2p = E2PFromSingleBox(ctx, l_expn, target_kernels)
+        p2p = P2P(ctx, target_kernels, exclude_self=False)
 
         fp = FieldPlotter(centers[:, -1], extent=0.3, npoints=res)
         targets = fp.points
@@ -733,6 +731,136 @@ def test_translations(ctx_factory, knl, local_expn_class, mpole_expn_class):
         print(verifier)
         print(30*"-")
         verifier()
+
+
+@pytest.mark.parametrize("order", [4])
+@pytest.mark.parametrize(("base_knl", "local_expn_class", "mpole_expn_class"), [
+    (LaplaceKernel(2), VolumeTaylorLocalExpansion, VolumeTaylorMultipoleExpansion),
+    ])
+@pytest.mark.parametrize("with_source_derivative", [
+    False,
+    True
+    ])
+def test_m2m_and_l2l_exprs_simpler(base_knl, local_expn_class, mpole_expn_class,
+        order, with_source_derivative):
+
+    from sympy.core.cache import clear_cache
+    clear_cache()
+
+    np.random.seed(17)
+
+    extra_kwargs = {}
+    if isinstance(base_knl, HelmholtzKernel):
+        if base_knl.allow_evanescent:
+            extra_kwargs["k"] = 0.2 * (0.707 + 0.707j)
+        else:
+            extra_kwargs["k"] = 0.2
+    if isinstance(base_knl, StokesletKernel):
+        extra_kwargs["mu"] = 0.2
+
+    if with_source_derivative:
+        knl = DirectionalSourceDerivative(base_knl, "dir_vec")
+    else:
+        knl = base_knl
+
+    mpole_expn = mpole_expn_class(knl, order=order)
+    local_expn = local_expn_class(knl, order=order)
+
+    from sumpy.symbolic import make_sym_vector, Symbol, USE_SYMENGINE
+    dvec = make_sym_vector("d", knl.dim)
+    src_coeff_exprs = [Symbol("src_coeff%d" % i) for i in range(len(mpole_expn))]
+
+    src_rscale = 3
+    tgt_rscale = 2
+
+    faster_m2m = mpole_expn.translate_from(mpole_expn, src_coeff_exprs, src_rscale,
+            dvec, tgt_rscale)
+    slower_m2m = mpole_expn.translate_from(mpole_expn, src_coeff_exprs, src_rscale,
+            dvec, tgt_rscale, _fast_version=False)
+
+    def _check_equal(expr1, expr2):
+        if USE_SYMENGINE:
+            return float((expr1 - expr2).expand()) == 0.0
+        else:
+            # with sympy we are using UnevaluatedExpr and expand doesn't expand it
+            # Running doit replaces UnevaluatedExpr with evaluated exprs
+            return float((expr1 - expr2).doit().expand()) == 0.0
+
+    for expr1, expr2 in zip(faster_m2m, slower_m2m):
+        assert _check_equal(expr1, expr2)
+
+    faster_l2l = local_expn.translate_from(local_expn, src_coeff_exprs, src_rscale,
+            dvec, tgt_rscale)
+    slower_l2l = local_expn.translate_from(local_expn, src_coeff_exprs, src_rscale,
+            dvec, tgt_rscale, _fast_version=False)
+    for expr1, expr2 in zip(faster_l2l, slower_l2l):
+        assert _check_equal(expr1, expr2)
+
+
+# {{{ test toeplitz
+
+def _m2l_translate_simple(tgt_expansion, src_expansion, src_coeff_exprs, src_rscale,
+                           dvec, tgt_rscale):
+
+    if not tgt_expansion.use_rscale:
+        src_rscale = 1
+        tgt_rscale = 1
+
+    from sumpy.expansion.multipole import VolumeTaylorMultipoleExpansionBase
+    if not isinstance(src_expansion, VolumeTaylorMultipoleExpansionBase):
+        return 1
+
+    # We know the general form of the multipole expansion is:
+    #
+    #    coeff0 * diff(kernel, mi0) + coeff1 * diff(kernel, mi1) + ...
+    #
+    # To get the local expansion coefficients, we take derivatives of
+    # the multipole expansion.
+    taker = src_expansion.kernel.get_derivative_taker(dvec, src_rscale, sac=None)
+
+    from sumpy.tools import add_mi
+
+    result = []
+    for deriv in tgt_expansion.get_coefficient_identifiers():
+        local_result = []
+        for coeff, term in zip(
+                src_coeff_exprs,
+                src_expansion.get_coefficient_identifiers()):
+
+            kernel_deriv = taker.diff(add_mi(deriv, term)) / src_rscale**sum(deriv)
+
+            local_result.append(
+                    coeff * kernel_deriv * tgt_rscale**sum(deriv))
+        result.append(sym.Add(*local_result))
+    return result
+
+
+def test_m2l_toeplitz():
+    dim = 3
+    knl = LaplaceKernel(dim)
+    local_expn_class = LinearPDEConformingVolumeTaylorLocalExpansion
+    mpole_expn_class = LinearPDEConformingVolumeTaylorMultipoleExpansion
+
+    local_expn = local_expn_class(knl, order=5)
+    mpole_expn = mpole_expn_class(knl, order=5)
+
+    dvec = sym.make_sym_vector("d", dim)
+    src_coeff_exprs = list(1 + np.random.randn(len(mpole_expn)))
+    src_rscale = 2.0
+    tgt_rscale = 1.0
+
+    expected_output = _m2l_translate_simple(local_expn, mpole_expn, src_coeff_exprs,
+                                           src_rscale, dvec, tgt_rscale)
+    actual_output = local_expn.translate_from(mpole_expn, src_coeff_exprs,
+                                              src_rscale, dvec, tgt_rscale, sac=None)
+
+    replace_dict = dict((d, np.random.rand(1)[0]) for d in dvec)
+    for sym_a, sym_b in zip(expected_output, actual_output):
+        num_a = sym_a.xreplace(replace_dict)
+        num_b = sym_b.xreplace(replace_dict)
+        assert abs(num_a - num_b)/abs(num_a) < 1e-10
+
+# }}}
 
 
 # You can test individual routines by typing

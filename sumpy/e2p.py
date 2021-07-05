@@ -56,17 +56,17 @@ class E2PBase(KernelCacheWrapper):
         if device is None:
             device = ctx.devices[0]
 
-        from sumpy.kernel import (
-            SourceDerivativeRemover, TargetDerivativeRemover,
-            AsymptoticScalingRemover)
-        sdr = SourceDerivativeRemover()
-        tdr = TargetDerivativeRemover()
+        from sumpy.kernel import (SourceTransformationRemover,
+                TargetTransformationRemover, AsymptoticScalingRemover)
+        sxr = SourceTransformationRemover()
+        txr = TargetTransformationRemover()
         adr = AsymptoticScalingRemover()
         expansion = expansion.with_kernel(
-            adr(sdr(expansion.kernel)))
+            adr(sxr(expansion.kernel)))
 
+        kernels = [sxr(knl) for knl in kernels]
         for knl in kernels:
-            assert adr(sdr(tdr(knl))) == expansion.kernel
+            assert adr(txr(knl)) == expansion.kernel
 
         self.ctx = ctx
         self.expansion = expansion
@@ -89,11 +89,10 @@ class E2PBase(KernelCacheWrapper):
 
         coeff_exprs = [sym.Symbol("coeff%d" % i)
                 for i in range(len(self.expansion.get_coefficient_identifiers()))]
-        value = self.expansion.evaluate(coeff_exprs, bvec, rscale, sac=sac)
 
         result_names = [
             sac.assign_unique("result_%d_p" % i,
-                knl.postprocess_at_target(value, bvec))
+                self.expansion.evaluate(knl, coeff_exprs, bvec, rscale, sac=sac))
             for i, knl in enumerate(self.kernels)
             ]
 
@@ -103,7 +102,8 @@ class E2PBase(KernelCacheWrapper):
         loopy_insns = to_loopy_insns(
                 sac.assignments.items(),
                 vector_names=self._vector_names,
-                pymbolic_expr_maps=[self.expansion.get_code_transformer()],
+                pymbolic_expr_maps=[
+                    knl.get_code_transformer() for knl in self.kernels],
                 retain_names=result_names,
                 complex_dtype=np.complex128  # FIXME
                 )
@@ -112,12 +112,15 @@ class E2PBase(KernelCacheWrapper):
 
     def get_kernel_scaling_assignment(self):
         from sumpy.symbolic import SympyToPymbolicMapper
+        from sumpy.tools import ScalingAssignmentTag
         sympy_conv = SympyToPymbolicMapper()
         return [lp.Assignment(id=None,
                     assignee="kernel_scaling",
                     expression=sympy_conv(
                         self.expansion.kernel.get_global_scaling_const()),
-                    temp_var_type=lp.Optional(None))]
+                    temp_var_type=lp.Optional(None),
+                    tags=frozenset([ScalingAssignmentTag()]),
+                    )]
 
     def get_cache_key(self):
         return (type(self).__name__, self.expansion, tuple(self.kernels))
@@ -191,7 +194,8 @@ class E2PFromSingleBox(E2PBase):
                 lang_version=MOST_RECENT_LANGUAGE_VERSION)
 
         loopy_knl = lp.tag_inames(loopy_knl, "idim*:unr")
-        loopy_knl = self.expansion.prepare_loopy_kernel(loopy_knl)
+        for knl in self.kernels:
+            loopy_knl = knl.prepare_loopy_kernel(loopy_knl)
 
         return loopy_knl
 
@@ -199,6 +203,8 @@ class E2PFromSingleBox(E2PBase):
         # FIXME
         knl = self.get_kernel()
         knl = lp.tag_inames(knl, dict(itgt_box="g.0"))
+        knl = self._allow_redundant_execution_of_knl_scaling(knl)
+
         return knl
 
     def __call__(self, queue, **kwargs):
@@ -300,7 +306,8 @@ class E2PFromCSR(E2PBase):
 
         loopy_knl = lp.tag_inames(loopy_knl, "idim*:unr")
         loopy_knl = lp.prioritize_loops(loopy_knl, "itgt_box,itgt,isrc_box")
-        loopy_knl = self.expansion.prepare_loopy_kernel(loopy_knl)
+        for knl in self.kernels:
+            loopy_knl = knl.prepare_loopy_kernel(loopy_knl)
 
         return loopy_knl
 
@@ -308,6 +315,7 @@ class E2PFromCSR(E2PBase):
         # FIXME
         knl = self.get_kernel()
         knl = lp.tag_inames(knl, dict(itgt_box="g.0"))
+        knl = self._allow_redundant_execution_of_knl_scaling(knl)
         return knl
 
     def __call__(self, queue, **kwargs):

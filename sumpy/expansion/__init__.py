@@ -24,7 +24,7 @@ import logging
 from pytools import memoize_method
 import sumpy.symbolic as sym
 from sumpy.tools import add_mi
-from .diff_op import make_identity_diff_op, laplacian
+from typing import List, Tuple
 
 __doc__ = """
 .. autoclass:: ExpansionBase
@@ -53,6 +53,7 @@ class ExpansionBase:
     .. automethod:: __eq__
     .. automethod:: __ne__
     """
+    init_arg_names = ("kernel", "order", "use_rscale")
 
     def __init__(self, kernel, order, use_rscale=None):
         # Don't be tempted to remove target derivatives here.
@@ -80,9 +81,6 @@ class ExpansionBase:
     def is_complex_valued(self):
         return self.kernel.is_complex_valued
 
-    def prepare_loopy_kernel(self, loopy_knl):
-        return self.kernel.prepare_loopy_kernel(loopy_knl)
-
     def get_code_transformer(self):
         return self.kernel.get_code_transformer()
 
@@ -109,7 +107,7 @@ class ExpansionBase:
         """
         raise NotImplementedError
 
-    def coefficients_from_source(self, avec, bvec, rscale, sac=None):
+    def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):
         """Form an expansion from a source point.
 
         :arg avec: vector from source to center.
@@ -123,7 +121,27 @@ class ExpansionBase:
         """
         raise NotImplementedError
 
-    def evaluate(self, coeffs, bvec, rscale, sac=None):
+    def coefficients_from_source_vec(self, kernels, avec, bvec, rscale, weights,
+            sac=None):
+        """Form an expansion with a linear combination of kernels and weights.
+
+        :arg avec: vector from source to center.
+        :arg bvec: vector from center to target. Not usually necessary,
+            except for line-Taylor expansion.
+        :arg sac: a symbolic assignment collection where temporary
+            expressions are stored.
+
+        :returns: a list of :mod:`sympy` expressions representing
+            the coefficients of the expansion.
+        """
+        result = [0]*len(self)
+        for knl, weight in zip(kernels, weights):
+            coeffs = self.coefficients_from_source(knl, avec, bvec, rscale, sac=sac)
+            for i in range(len(result)):
+                result[i] += weight * coeffs[i]
+        return result
+
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
         """
         :return: a :mod:`sympy` expression corresponding
             to the evaluated expansion with the coefficients
@@ -151,6 +169,21 @@ class ExpansionBase:
 
     def __ne__(self, other):
         return not self.__eq__(other)
+
+    def copy(self, **kwargs):
+        new_kwargs = {
+                name: getattr(self, name)
+                for name in self.init_arg_names}
+
+        for name in self.init_arg_names:
+            new_kwargs[name] = kwargs.pop(name, getattr(self, name))
+
+        if kwargs:
+            raise TypeError("unexpected keyword arguments '%s'"
+                % ", ".join(kwargs))
+
+        return type(self)(**new_kwargs)
+
 
 # }}}
 
@@ -207,6 +240,78 @@ class ExpansionTermsWrangler:
                 % ", ".join(kwargs))
 
         return type(self)(**new_kwargs)
+
+    @memoize_method
+    def _split_coeffs_into_hyperplanes(self) -> List[Tuple[int, List[Tuple[int]]]]:
+        r"""
+        This splits the coefficients into :math:`O(p)` disjoint sets
+        so that for each set, all the identifiers have the form,
+        :math:`(m_1, m_2, ..., m_{j-1}, c, m_{j+1}, ... , m_{\text{dim}})`
+        where :math:`c` is a constant. Geometrically, each set is an axis-aligned
+        hyperplane.
+
+        If this is an instance of :class:`LinearPDEBasedExpansionTermsWrangler`,
+        then the number of sets will be :math:`O(1)`.
+
+        In the returned object ``[(axis, [mi_1, mi2, ...]), ...]``,
+        each element in the outer list represents a hyperplane. Each element
+        is a 2-tuple where the first element in the tuple is the axis number *axis*
+        to which the hyperplane is orthogonal. The second element in the tuple
+        is a list of multi-indices in the hyperplane corresponding to the stored
+        coefficients.
+
+        E.g. for Laplace 3D order 4, the result could be::
+        [
+          (2, [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (0, 1, 0), (1, 1, 0),
+               (2, 1, 0), (0, 2, 0), (1, 2, 0), (0, 3, 0)]),
+          (2, [(0, 0, 1), (1, 0, 1), (2, 0, 1), (0, 1, 1), (1, 1, 1), (0, 2, 1)]),
+        ]
+        """
+        mis = self.get_full_coefficient_identifiers()
+        mi_to_index = {mi: i for i, mi in enumerate(mis)}
+
+        # Each hyperplane stored below is identified by a tuple of the axis
+        # to which it is orthogonal to and the constant `c` described above
+        hyperplanes = []
+        if isinstance(self, LinearPDEBasedExpansionTermsWrangler):
+            pde_dict, = self.knl.get_pde_as_diff_op().eqs
+
+            if not all(ident.mi in mi_to_index for ident in pde_dict):
+                # The order of the expansion is less than the order of the PDE.
+                # Treat as if full expansion.
+                pass
+            else:
+                # Calculate the multi-index that appears last in in the PDE in
+                # reverse degree lexicographic order (degrevlex).
+                # The monomial ordering used here which is degrevlex, must match
+                # the monomial ordering used in LinearPDEBasedExpansionTermsWrangler
+                max_mi_idx = max(mi_to_index[ident.mi] for
+                                 ident in pde_dict.keys())
+                max_mi = mis[max_mi_idx]
+                hyperplanes.extend(
+                    (d, const)
+                    for d in range(self.dim)
+                    for const in range(max_mi[d]))
+
+        if not hyperplanes:
+            d = self.dim - 1
+            hyperplanes.extend((d, const) for const in range(self.order + 1))
+
+        res = []
+        seen_mis = set()
+        for d, const in hyperplanes:
+            coeffs_in_hyperplane = []
+            for mi in self.get_coefficient_identifiers():
+                # Check if the multi-index is in this hyperplane and
+                # if it is not in any of the hyperplanes we saw before
+                # (This rejects coefficients that might be in multiple
+                # hyperplanes, such as near the origin.)
+                if mi[d] == const and mi not in seen_mis:
+                    coeffs_in_hyperplane.append(mi)
+                    seen_mis.add(mi)
+            res.append((d, coeffs_in_hyperplane))
+
+        return res
 
 
 class FullExpansionTermsWrangler(ExpansionTermsWrangler):
@@ -300,18 +405,18 @@ class CSEMatVecOperator:
 class LinearPDEBasedExpansionTermsWrangler(ExpansionTermsWrangler):
     """
     .. automethod:: __init__
-    .. automethod:: get_pde_as_diff_op
     """
 
-    init_arg_names = ("order", "dim", "max_mi")
+    init_arg_names = ("order", "dim", "knl", "max_mi")
 
-    def __init__(self, order, dim, max_mi=None):
+    def __init__(self, order, dim, knl, max_mi=None):
         r"""
         :param order: order of the expansion
         :param dim: number of dimensions
+        :param knl: kernel for the PDE
         """
-        super().__init__(order, dim,
-                max_mi)
+        super().__init__(order, dim, max_mi)
+        self.knl = knl
 
     def get_coefficient_identifiers(self):
         return self.stored_identifiers
@@ -319,39 +424,23 @@ class LinearPDEBasedExpansionTermsWrangler(ExpansionTermsWrangler):
     def get_full_kernel_derivatives_from_stored(self, stored_kernel_derivatives,
             rscale, sac=None):
 
-        def save_intermediate(expr):
-            if sac is None:
-                return expr
-            return sym.Symbol(sac.assign_unique("projection_temp", expr))
-
+        from sumpy.tools import add_to_sac
         projection_matrix = self.get_projection_matrix(rscale)
         return projection_matrix.matvec(stored_kernel_derivatives,
-                                        save_intermediate)
+                lambda x: add_to_sac(sac, x))
 
     def get_stored_mpole_coefficients_from_full(self, full_mpole_coefficients,
             rscale, sac=None):
 
-        def save_intermediate(expr):
-            if sac is None:
-                return expr
-            return sym.Symbol(sac.assign_unique("compress_temp", expr))
-
+        from sumpy.tools import add_to_sac
         projection_matrix = self.get_projection_matrix(rscale)
         return projection_matrix.transpose_matvec(full_mpole_coefficients,
-                                                  save_intermediate)
+                lambda x: add_to_sac(sac, x))
 
     @property
     def stored_identifiers(self):
         stored_identifiers, _ = self.get_stored_ids_and_unscaled_projection_matrix()
         return stored_identifiers
-
-    def get_pde_as_diff_op(self):
-        r"""
-        Returns the PDE as a :class:`sumpy.expansion.diff_op.LinearPDESystemOperator`
-        object `L` where `L(u) = 0` is the PDE.
-        """
-
-        raise NotImplementedError
 
     @memoize_method
     def get_stored_ids_and_unscaled_projection_matrix(self):
@@ -362,7 +451,7 @@ class LinearPDEBasedExpansionTermsWrangler(ExpansionTermsWrangler):
         coeff_ident_enumerate_dict = {tuple(mi): i for
                                             (i, mi) in enumerate(mis)}
 
-        diff_op = self.get_pde_as_diff_op()
+        diff_op = self.knl.get_pde_as_diff_op()
         assert len(diff_op.eqs) == 1
         pde_dict = {k.mi: v for k, v in diff_op.eqs[0].items()}
         for ident in pde_dict.keys():
@@ -378,7 +467,7 @@ class LinearPDEBasedExpansionTermsWrangler(ExpansionTermsWrangler):
                 return mis, op
 
         # Calculate the multi-index that appears last in in the PDE in
-        # reverse degree lexicographic order.
+        # reverse degree lexicographic order (degrevlex).
         max_mi_idx = max(coeff_ident_enumerate_dict[ident] for
                          ident in pde_dict.keys())
         max_mi = mis[max_mi_idx]
@@ -484,45 +573,6 @@ class LinearPDEBasedExpansionTermsWrangler(ExpansionTermsWrangler):
                                  projection_with_rscale, shape)
 
 
-class LaplaceExpansionTermsWrangler(LinearPDEBasedExpansionTermsWrangler):
-
-    init_arg_names = ("order", "dim", "max_mi")
-
-    def __init__(self, order, dim, max_mi=None):
-        super().__init__(order=order, dim=dim,
-            max_mi=max_mi)
-
-    def get_pde_as_diff_op(self):
-        w = make_identity_diff_op(self.dim)
-        return laplacian(w)
-
-
-class HelmholtzExpansionTermsWrangler(LinearPDEBasedExpansionTermsWrangler):
-
-    init_arg_names = ("order", "dim", "helmholtz_k_name", "max_mi")
-
-    def __init__(self, order, dim, helmholtz_k_name, max_mi=None):
-        self.helmholtz_k_name = helmholtz_k_name
-        super().__init__(order=order, dim=dim,
-            max_mi=max_mi)
-
-    def get_pde_as_diff_op(self, **kwargs):
-        w = make_identity_diff_op(self.dim)
-        k = sym.Symbol(self.helmholtz_k_name)
-        return (laplacian(w) + k**2 * w)
-
-
-class BiharmonicExpansionTermsWrangler(LinearPDEBasedExpansionTermsWrangler):
-
-    init_arg_names = ("order", "dim", "max_mi")
-
-    def __init__(self, order, dim, max_mi=None):
-        super().__init__(order=order, dim=dim,
-            max_mi=max_mi)
-
-    def get_pde_as_diff_op(self, **kwargs):
-        w = make_identity_diff_op(self.dim)
-        return laplacian(laplacian(w))
 # }}}
 
 
@@ -579,35 +629,47 @@ class VolumeTaylorExpansion(VolumeTaylorExpansionBase):
         self.expansion_terms_wrangler_key = (order, kernel.dim)
 
 
-class LaplaceConformingVolumeTaylorExpansion(VolumeTaylorExpansionBase):
+class LinearPDEConformingVolumeTaylorExpansion(VolumeTaylorExpansionBase):
 
-    expansion_terms_wrangler_class = LaplaceExpansionTermsWrangler
+    expansion_terms_wrangler_class = LinearPDEBasedExpansionTermsWrangler
     expansion_terms_wrangler_cache = {}
 
     # not user-facing, be strict about having to pass use_rscale
     def __init__(self, kernel, order, use_rscale):
-        self.expansion_terms_wrangler_key = (order, kernel.dim)
+        self.expansion_terms_wrangler_key = (order, kernel.dim, kernel)
 
 
-class HelmholtzConformingVolumeTaylorExpansion(VolumeTaylorExpansionBase):
+class LaplaceConformingVolumeTaylorExpansion(
+        LinearPDEConformingVolumeTaylorExpansion):
 
-    expansion_terms_wrangler_class = HelmholtzExpansionTermsWrangler
-    expansion_terms_wrangler_cache = {}
+    def __init__(self, *args, **kwargs):
+        from warnings import warn
+        warn("LaplaceConformingVolumeTaylorExpansion is deprecated. "
+             "Use LinearPDEConformingVolumeTaylorExpansion instead.",
+                DeprecationWarning, stacklevel=2)
+        super().__init__(*args, **kwargs)
 
-    # not user-facing, be strict about having to pass use_rscale
-    def __init__(self, kernel, order, use_rscale):
-        helmholtz_k_name = kernel.get_base_kernel().helmholtz_k_name
-        self.expansion_terms_wrangler_key = (order, kernel.dim, helmholtz_k_name)
+
+class HelmholtzConformingVolumeTaylorExpansion(
+        LinearPDEConformingVolumeTaylorExpansion):
+
+    def __init__(self, *args, **kwargs):
+        from warnings import warn
+        warn("HelmholtzConformingVolumeTaylorExpansion is deprecated. "
+             "Use LinearPDEConformingVolumeTaylorExpansion instead.",
+                DeprecationWarning, stacklevel=2)
+        super().__init__(*args, **kwargs)
 
 
-class BiharmonicConformingVolumeTaylorExpansion(VolumeTaylorExpansionBase):
+class BiharmonicConformingVolumeTaylorExpansion(
+        LinearPDEConformingVolumeTaylorExpansion):
 
-    expansion_terms_wrangler_class = BiharmonicExpansionTermsWrangler
-    expansion_terms_wrangler_cache = {}
-
-    # not user-facing, be strict about having to pass use_rscale
-    def __init__(self, kernel, order, use_rscale):
-        self.expansion_terms_wrangler_key = (order, kernel.dim)
+    def __init__(self, *args, **kwargs):
+        from warnings import warn
+        warn("BiharmonicConformingVolumeTaylorExpansion is deprecated. "
+             "Use LinearPDEConformingVolumeTaylorExpansion instead.",
+                DeprecationWarning, stacklevel=2)
+        super().__init__(*args, **kwargs)
 
 # }}}
 
@@ -657,13 +719,10 @@ class DefaultExpansionFactory(ExpansionFactoryBase):
     def get_local_expansion_class(self, base_kernel):
         """Returns a subclass of :class:`ExpansionBase` suitable for *base_kernel*.
         """
-        from sumpy.kernel import (HelmholtzKernel, LaplaceKernel, YukawaKernel,
-                BiharmonicKernel, StokesletKernel, StressletKernel)
+        from sumpy.kernel import (HelmholtzKernel, YukawaKernel)
 
         from sumpy.expansion.local import (H2DLocalExpansion, Y2DLocalExpansion,
-                HelmholtzConformingVolumeTaylorLocalExpansion,
-                LaplaceConformingVolumeTaylorLocalExpansion,
-                BiharmonicConformingVolumeTaylorLocalExpansion,
+                LinearPDEConformingVolumeTaylorLocalExpansion,
                 VolumeTaylorLocalExpansion)
 
         if (isinstance(base_kernel.get_base_kernel(), HelmholtzKernel)
@@ -672,27 +731,20 @@ class DefaultExpansionFactory(ExpansionFactoryBase):
         elif (isinstance(base_kernel.get_base_kernel(), YukawaKernel)
                 and base_kernel.dim == 2):
             return Y2DLocalExpansion
-        elif isinstance(base_kernel.get_base_kernel(), HelmholtzKernel):
-            return HelmholtzConformingVolumeTaylorLocalExpansion
-        elif isinstance(base_kernel.get_base_kernel(), LaplaceKernel):
-            return LaplaceConformingVolumeTaylorLocalExpansion
-        elif isinstance(base_kernel.get_base_kernel(),
-                (BiharmonicKernel, StokesletKernel, StressletKernel)):
-            return BiharmonicConformingVolumeTaylorLocalExpansion
-        else:
+        try:
+            base_kernel.get_base_kernel().get_pde_as_diff_op()
+            return LinearPDEConformingVolumeTaylorLocalExpansion
+        except NotImplementedError:
             return VolumeTaylorLocalExpansion
 
     def get_multipole_expansion_class(self, base_kernel):
         """Returns a subclass of :class:`ExpansionBase` suitable for *base_kernel*.
         """
-        from sumpy.kernel import (HelmholtzKernel, LaplaceKernel, YukawaKernel,
-                BiharmonicKernel, StokesletKernel, StressletKernel)
+        from sumpy.kernel import (HelmholtzKernel, YukawaKernel)
 
         from sumpy.expansion.multipole import (H2DMultipoleExpansion,
                 Y2DMultipoleExpansion,
-                LaplaceConformingVolumeTaylorMultipoleExpansion,
-                HelmholtzConformingVolumeTaylorMultipoleExpansion,
-                BiharmonicConformingVolumeTaylorMultipoleExpansion,
+                LinearPDEConformingVolumeTaylorMultipoleExpansion,
                 VolumeTaylorMultipoleExpansion)
 
         if (isinstance(base_kernel.get_base_kernel(), HelmholtzKernel)
@@ -701,14 +753,10 @@ class DefaultExpansionFactory(ExpansionFactoryBase):
         elif (isinstance(base_kernel.get_base_kernel(), YukawaKernel)
                 and base_kernel.dim == 2):
             return Y2DMultipoleExpansion
-        elif isinstance(base_kernel.get_base_kernel(), LaplaceKernel):
-            return LaplaceConformingVolumeTaylorMultipoleExpansion
-        elif isinstance(base_kernel.get_base_kernel(), HelmholtzKernel):
-            return HelmholtzConformingVolumeTaylorMultipoleExpansion
-        elif isinstance(base_kernel.get_base_kernel(),
-                (BiharmonicKernel, StokesletKernel, StressletKernel)):
-            return BiharmonicConformingVolumeTaylorMultipoleExpansion
-        else:
+        try:
+            base_kernel.get_base_kernel().get_pde_as_diff_op()
+            return LinearPDEConformingVolumeTaylorMultipoleExpansion
+        except NotImplementedError:
             return VolumeTaylorMultipoleExpansion
 
 # }}}

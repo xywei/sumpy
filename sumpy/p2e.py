@@ -23,7 +23,6 @@ THE SOFTWARE.
 import numpy as np
 import loopy as lp
 from loopy.version import MOST_RECENT_LANGUAGE_VERSION
-import pymbolic
 
 from sumpy.tools import KernelCacheWrapper, KernelComputation
 
@@ -57,18 +56,28 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
           number of strength arrays that need to be passed.
           Default: all kernels use the same strength.
         """
+        from sumpy.kernel import (TargetTransformationRemover,
+                SourceTransformationRemover)
+        txr = TargetTransformationRemover()
+        sxr = SourceTransformationRemover()
+
         if kernels is None:
-            kernels = [expansion.kernel]
+            kernels = [txr(expansion.kernel)]
+        else:
+            kernels = kernels
 
-        KernelComputation.__init__(self, ctx=ctx, kernels=kernels,
-                strength_usage=strength_usage, value_dtypes=None,
-                name=name, device=device)
+        expansion = expansion.with_kernel(sxr(txr(expansion.kernel)))
 
-        from sumpy.kernel import TargetDerivativeRemover
-        expansion = expansion.with_kernel(
-                TargetDerivativeRemover()(expansion.kernel))
+        for knl in kernels:
+            assert txr(knl) == knl
+            assert sxr(knl) == expansion.kernel
 
-        from sumpy.kernel import AsymptoticallyInformedKernel
+        KernelComputation.__init__(self, ctx=ctx, target_kernels=[],
+            source_kernels=kernels,
+            strength_usage=strength_usage, value_dtypes=None,
+            name=name, device=device)
+
+        from sumpy.kernel import AsymptoticallyInformedKernel, TargetDerivativeRemover
         base_knl = TargetDerivativeRemover()(expansion.kernel)
         if base_knl != expansion.kernel:
             if isinstance(base_knl, AsymptoticallyInformedKernel):
@@ -102,19 +111,19 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         from sumpy.assignment_collection import SymbolicAssignmentCollection
         sac = SymbolicAssignmentCollection()
 
+        strengths = [sp.Symbol(f"strength_{i}") for i in self.strength_usage]
+        coeffs = self.expansion.coefficients_from_source_vec(self.source_kernels,
+                    avec, bvec, rscale, strengths, sac=sac)
+
         coeff_names = []
-        for knl_idx, kernel in enumerate(self.kernels):
-            for i, coeff_i in enumerate(
-                self.expansion.coefficients_from_source(kernel, avec, bvec, rscale,
-                     sac)
-            ):
-                sac.add_assignment(f"coeff{i}_{knl_idx}", coeff_i)
-                coeff_names.append(f"coeff{i}_{knl_idx}")
+        for i, coeff in enumerate(coeffs):
+            sac.add_assignment(f"coeff{i}", coeff)
+            coeff_names.append(f"coeff{i}")
 
         sac.run_global_cse()
 
         code_transformers = [self.expansion.get_code_transformer()] \
-            + [kernel.get_code_transformer() for kernel in self.kernels]
+            + [kernel.get_code_transformer() for kernel in self.source_kernels]
 
         from sumpy.codegen import to_loopy_insns
         return to_loopy_insns(
@@ -126,17 +135,11 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
                 )
 
     def get_cache_key(self):
-        return (type(self).__name__, self.name, self.expansion, tuple(self.kernels),
-                tuple(self.strength_usage))
+        return (type(self).__name__, self.name, self.expansion,
+                tuple(self.source_kernels), tuple(self.strength_usage))
 
-    def get_result_expr(self, icoeff):
-        isrc = pymbolic.var("isrc")
-        return sum(pymbolic.var(f"coeff{icoeff}_{i}")
-                    * pymbolic.var("strengths")[self.strength_usage[i], isrc]
-                for i in range(len(self.kernels)))
 
 # }}}
-
 
 # {{{ P2E from single box (P2M, likely)
 
@@ -164,9 +167,10 @@ class P2EFromSingleBox(P2EBase):
                         <> a[idim] = center[idim] - sources[idim, isrc] {dup=idim}
                         """] + self.get_loopy_instructions() + ["""
                     end
-                    """] + [f"""
+                    """] + [f"<> strength_{i} = strengths[{i}, isrc]" for
+                        i in set(self.strength_usage)] + [f"""
                     tgt_expansions[src_ibox-tgt_base_ibox, {coeffidx}] = \
-                        simul_reduce(sum, isrc, {self.get_result_expr(coeffidx)}) \
+                        simul_reduce(sum, isrc, coeff{coeffidx}) \
                             {{id_prefix=write_expn}}
                     """ for coeffidx in range(ncoeffs)] + ["""
                 end
@@ -174,8 +178,8 @@ class P2EFromSingleBox(P2EBase):
                 [
                     lp.GlobalArg("sources", None, shape=(self.dim, "nsources"),
                         dim_tags="sep,c"),
-                    lp.GlobalArg("strengths", None, shape="strength_count, nsources",
-                        dim_tags="sep,C"),
+                    lp.GlobalArg("strengths", None,
+                        shape="strength_count, nsources", dim_tags="sep,C"),
                     lp.GlobalArg("box_source_starts,box_source_counts_nonchild",
                         None, shape=None),
                     lp.GlobalArg("centers", None, shape="dim, aligned_nboxes"),
@@ -185,7 +189,8 @@ class P2EFromSingleBox(P2EBase):
                     lp.ValueArg("nboxes,aligned_nboxes,tgt_base_ibox", np.int32),
                     lp.ValueArg("nsources", np.int32),
                     "..."
-                ] + gather_loopy_source_arguments(self.kernels + (self.expansion,)),
+                ] + gather_loopy_source_arguments(self.source_kernels
+                        + (self.expansion,)),
                 name=self.name,
                 assumptions="nsrc_boxes>=1",
                 silenced_warnings="write_race(write_expn*)",
@@ -194,7 +199,8 @@ class P2EFromSingleBox(P2EBase):
                     strength_count=self.strength_count),
                 lang_version=MOST_RECENT_LANGUAGE_VERSION)
 
-        loopy_knl = self.expansion.prepare_loopy_kernel(loopy_knl)
+        for knl in self.source_kernels:
+            loopy_knl = knl.prepare_loopy_kernel(loopy_knl)
         loopy_knl = lp.tag_inames(loopy_knl, "idim*:unr")
 
         return loopy_knl
@@ -203,6 +209,7 @@ class P2EFromSingleBox(P2EBase):
         # FIXME
         knl = self.get_kernel()
         knl = lp.split_iname(knl, "isrc_box", 16, outer_tag="g.0")
+        knl = self._allow_redundant_execution_of_knl_scaling(knl)
 
         return knl
 
@@ -255,7 +262,8 @@ class P2EFromCSR(P2EBase):
                         np.int32),
                     lp.ValueArg("nsources", np.int32),
                     "..."
-                ] + gather_loopy_source_arguments(self.kernels + (self.expansion,)))
+                ] + gather_loopy_source_arguments(self.source_kernels
+                        + (self.expansion,)))
 
         loopy_knl = lp.make_kernel(
                 [
@@ -281,13 +289,13 @@ class P2EFromCSR(P2EBase):
                         for isrc
                             <> a[idim] = center[idim] - sources[idim, isrc] \
                                     {dup=idim}
-                            """] + self.get_loopy_instructions() + ["""
-                        end
-                    end
                     """] + [f"""
+                             <> strength_{i} = strengths[{i}, isrc]
+                             """ for i in set(self.strength_usage)] + self.get_loopy_instructions() + ["""
+                        end
+                    end"""] + [f"""
                     tgt_expansions[tgt_ibox - tgt_base_ibox, {coeffidx}] = \
-                            simul_reduce(sum, (isrc_box, isrc),
-                                {self.get_result_expr(coeffidx)}) \
+                            simul_reduce(sum, (isrc_box, isrc), coeff{coeffidx}) \
                             {{id_prefix=write_expn}}
                     """ for coeffidx in range(ncoeffs)] + ["""
                 end
@@ -301,7 +309,8 @@ class P2EFromCSR(P2EBase):
                     strength_count=self.strength_count),
                 lang_version=MOST_RECENT_LANGUAGE_VERSION)
 
-        loopy_knl = self.expansion.prepare_loopy_kernel(loopy_knl)
+        for knl in self.source_kernels:
+            loopy_knl = knl.prepare_loopy_kernel(loopy_knl)
         loopy_knl = lp.tag_inames(loopy_knl, "idim*:unr")
 
         return loopy_knl
@@ -310,6 +319,7 @@ class P2EFromCSR(P2EBase):
         # FIXME
         knl = self.get_kernel()
         knl = lp.split_iname(knl, "itgt_box", 16, outer_tag="g.0")
+        knl = self._allow_redundant_execution_of_knl_scaling(knl)
 
         return knl
 

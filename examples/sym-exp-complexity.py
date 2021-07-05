@@ -3,14 +3,16 @@ import pyopencl as cl
 import loopy as lp
 from sumpy.kernel import LaplaceKernel, HelmholtzKernel
 from sumpy.expansion.local import (
-        LaplaceConformingVolumeTaylorLocalExpansion,
-        HelmholtzConformingVolumeTaylorLocalExpansion,
+        LinearPDEConformingVolumeTaylorLocalExpansion,
         )
 from sumpy.expansion.multipole import (
-        LaplaceConformingVolumeTaylorMultipoleExpansion,
-        HelmholtzConformingVolumeTaylorMultipoleExpansion,
+        LinearPDEConformingVolumeTaylorMultipoleExpansion,
         )
 from sumpy.e2e import E2EFromCSR
+try:
+    import matplotlib.pyplot as plt
+except ModuleNotFoundError:
+    plt = None
 
 
 def find_flops():
@@ -18,13 +20,13 @@ def find_flops():
 
     if 0:
         knl = LaplaceKernel(2)
-        m_expn_cls = LaplaceConformingVolumeTaylorMultipoleExpansion
-        l_expn_cls = LaplaceConformingVolumeTaylorLocalExpansion
+        m_expn_cls = LinearPDEConformingVolumeTaylorMultipoleExpansion
+        l_expn_cls = LinearPDEConformingVolumeTaylorLocalExpansion
         flop_type = np.float64
     else:
         knl = HelmholtzKernel(2)
-        m_expn_cls = HelmholtzConformingVolumeTaylorMultipoleExpansion
-        l_expn_cls = HelmholtzConformingVolumeTaylorLocalExpansion
+        m_expn_cls = LinearPDEConformingVolumeTaylorMultipoleExpansion
+        l_expn_cls = LinearPDEConformingVolumeTaylorLocalExpansion
         flop_type = np.complex128
 
     orders = list(range(1, 11, 1))
@@ -59,28 +61,28 @@ def plot_flops():
         flops = [62, 300, 914, 2221, 4567, 8405, 14172, 22538, 34113]
         filename = "laplace-m2l-complexity-3d.pdf"
 
-    elif 0:
+    elif 1:
         case = "2D Laplace M2L"
         orders = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
                 18, 19, 20]
         flops = [36, 99, 193, 319, 476, 665, 889, 1143, 1429, 1747, 2097, 2479, 2893,
                 3339, 3817, 4327, 4869, 5443, 6049, 6687]
         filename = "laplace-m2l-complexity-2d.pdf"
-    elif 1:
+    elif 0:
         case = "2D Helmholtz M2L"
         orders = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         flops = [45, 194, 474, 931, 1650, 2632, 3925, 5591, 7706, 10272]
         filename = "helmholtz-m2l-complexity-2d.pdf"
 
-    import matplotlib.pyplot as plt
-    plt.rc("font", size=16)
-    plt.title(case)
-    plt.ylabel("Flop count")
-    plt.xlabel("Expansion order")
-    plt.loglog(orders, flops, "o-")
-    plt.grid()
-    plt.tight_layout()
-    plt.savefig(filename)
+    if plt is not None:
+        plt.rc("font", size=16)
+        plt.title(case)
+        plt.ylabel("Flop count")
+        plt.xlabel("Expansion order")
+        plt.loglog(orders, flops, "o-")
+        plt.grid()
+        plt.tight_layout()
+        plt.savefig(filename)
 
 
 if __name__ == "__main__":
