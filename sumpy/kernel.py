@@ -26,7 +26,6 @@ import numpy as np
 import sumpy.symbolic as sym
 from pymbolic.mapper import IdentityMapper, CSECachingMapperMixin
 from sumpy.symbolic import pymbolic_real_norm_2
-import sumpy.symbolic as sym
 from pymbolic.primitives import make_sym_vector
 from pymbolic import var, parse
 from pytools import memoize_method

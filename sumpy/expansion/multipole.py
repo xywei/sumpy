@@ -57,8 +57,7 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
         compresses them. This is more efficient that calculating full
         coefficients, compressing and then summing.
         """
-        from sumpy.kernel import (KernelWrapper,
-            DirectionalSourceDerivative, AsymptoticallyInformedKernel)
+        from sumpy.kernel import KernelWrapper
         from sumpy.tools import mi_power, mi_factorial
 
         if not self.use_rscale:
