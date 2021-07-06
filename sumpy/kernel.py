@@ -1467,6 +1467,9 @@ class _AsymptoticallyRescaledKernelExpressionFactory:
 class AsymptoticallyInformedKernel(KernelWrapper):
     """An asymptotically informed kernel should behave the same as its inner kernel
     if the handler does not know how to take advantage of the added information.
+    Specifically, the kernel keeps a record of what type of expansion will be used
+    on it. This information needs to be kept updated by the FMM driver for correct
+    scaling.
     """
     init_arg_names = ("inner_kernel", "scaling_expression", "geometric_order",
                       "expansion_class")
@@ -1516,11 +1519,21 @@ class AsymptoticallyInformedKernel(KernelWrapper):
                           self.scaling_expression, self.geometric_order,
                           expn_class)
 
+    def get_base_kernel(self):
+        """The base kernel is wrapped with the same asymptotic information.
+        """
+        return type(self)(
+            self.inner_kernel.get_base_kernel(), self.scaling_expression,
+            self.geometric_order, self.expansion_class)
+
     def get_expression(self, scaled_dist_vec, expn_class=None):
-        """To get rescaled expression, pass in scaled_dist_vec = *None*.
+        """To get the asymptotically rescaled expression, pass in
+        scaled_dist_vec = *None*. Otherwise, it delegates the request to its
+        inner kernel.
         """
         # In these special cases, we allow falling back to the inner kernel
-        # to be compatible with p2p, p2e and e2p.
+        # to be compatible with p2p, p2e and e2p. It is important to let
+        # other forms like a+tau*b be rescaled.
         # In the meanwhile, be careful not to include the scaling into the p2p
         # result.
         from sumpy.symbolic import make_sym_vector

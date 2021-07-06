@@ -244,6 +244,7 @@ class LayerPotential(LayerPotentialBase):
         sat_insns_data = []
         for iknl, knl in enumerate(self.target_kernels):
             try:
+                knl = knl.replace_expansion_class(type(self.expansion))
                 sat_expr = knl.get_scaling_expression(None)
             except AttributeError:
                 sat_expr = None
@@ -259,9 +260,6 @@ class LayerPotential(LayerPotentialBase):
             sat_insns = to_loopy_insns(
                     sat_insns_data,
                     vector_names=self._vector_names,
-                    pymbolic_expr_maps=[
-                        expn.kernel.get_code_transformer()
-                        for expn in self.target_kernels],
                     retain_names=[datpair[0] for datpair in sat_insns_data],
                     complex_dtype=np.complex128)  # FIXME
         else:

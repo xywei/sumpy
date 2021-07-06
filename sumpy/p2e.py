@@ -56,8 +56,9 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
           number of strength arrays that need to be passed.
           Default: all kernels use the same strength.
         """
-        from sumpy.kernel import (TargetTransformationRemover,
-                SourceTransformationRemover)
+        from sumpy.kernel import (
+            TargetTransformationRemover,
+            SourceTransformationRemover, AsymptoticallyInformedKernel)
         txr = TargetTransformationRemover()
         sxr = SourceTransformationRemover()
 
@@ -70,26 +71,28 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
 
         for knl in kernels:
             assert txr(knl) == knl
-            assert sxr(knl) == expansion.kernel
+            if sxr(knl) != expansion.kernel:
+                assert isinstance(sxr(knl), AsymptoticallyInformedKernel)
+                assert isinstance(expansion.kernel, AsymptoticallyInformedKernel)
+                assert sxr(knl).inner_kernel == expansion.kernel.inner_kernel
+
+        kernels = [knl.replace_expansion_class(type(expansion))
+                   if isinstance(knl, AsymptoticallyInformedKernel)
+                   else knl
+                   for knl in kernels]
 
         KernelComputation.__init__(self, ctx=ctx, target_kernels=[],
             source_kernels=kernels,
             strength_usage=strength_usage, value_dtypes=None,
             name=name, device=device)
 
-        from sumpy.kernel import AsymptoticallyInformedKernel, TargetDerivativeRemover
-        base_knl = TargetDerivativeRemover()(expansion.kernel)
-        if base_knl != expansion.kernel:
-            if isinstance(base_knl, AsymptoticallyInformedKernel):
-                # TODO: target derivatives of scaled kernels using Leibniz's rule
-                # (fg)' = f'g + fg' ==> f' = [(fg)' - fg'] / g = (fg)'/g - fg'/g,
-                # i.e.,
-                #        f' ~ QBX[(fg)']/g - QBX[fg]*g'/g^2,
-                # where
-                #        QBX[(fg)'] ~ QBX[fg]',
-                # can be computed by differentiating QBMAX local expansions.
-                raise ValueError(
-                    "derivatives of scaled kernel is not currently supported.")
+        # TODO: target derivatives of scaled kernels using Leibniz's rule
+        # (fg)' = f'g + fg' ==> f' = [(fg)' - fg'] / g = (fg)'/g - fg'/g,
+        # i.e.,
+        #        f' ~ QBX[(fg)']/g - QBX[fg]*g'/g^2,
+        # where
+        #        QBX[(fg)'] ~ QBX[fg]',
+        # can be computed by differentiating QBMAX local expansions.
 
         self.expansion = expansion
         self.dim = expansion.dim
@@ -112,6 +115,7 @@ class P2EBase(KernelComputation, KernelCacheWrapper):
         sac = SymbolicAssignmentCollection()
 
         strengths = [sp.Symbol(f"strength_{i}") for i in self.strength_usage]
+
         coeffs = self.expansion.coefficients_from_source_vec(self.source_kernels,
                     avec, bvec, rscale, strengths, sac=sac)
 

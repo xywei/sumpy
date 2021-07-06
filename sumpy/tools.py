@@ -426,7 +426,7 @@ class DifferentiatedExprDerivativeTaker:
             for extra_mi, coeff in self.derivative_transformation.items())
 
         if subs:
-            result = result.sub(subs)
+            result = result.subs(subs)
 
         return result * save_intermediate(1 / self.taker.rscale ** max_order)
 
