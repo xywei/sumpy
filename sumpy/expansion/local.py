@@ -178,7 +178,8 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         if not self.use_rscale:
             rscale = 1
         base_kernel = single_valued(knl.get_base_kernel() for knl in kernels)
-        # TODO: use a kernel mapper to find asymptotic info wrapper that is not the outmost layer
+        # TODO: use a kernel mapper to find asymptotic info wrapper that is not
+        # the outmost layer
         from sumpy.kernel import AsymptoticallyInformedKernel
         using_qbmax = isinstance(base_kernel, AsymptoticallyInformedKernel)
 
@@ -241,7 +242,8 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
                     return add_to_sac(sac, x)
 
                 for i, mi in enumerate(self.get_coefficient_identifiers()):
-                    result[i] += weight * taker.diff(mi, save_temp, subs=post_diff_subs)
+                    result[i] += weight * taker.diff(
+                        mi, save_temp, subs=post_diff_subs)
         return result
 
     def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):
@@ -258,6 +260,13 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
 
         bvec_scaled = [b*rscale**-1 for b in bvec]
         from sumpy.tools import mi_power, mi_factorial
+
+        from sumpy.kernel import AsymptoticScalingDetector
+        asd = AsymptoticScalingDetector()
+        using_qbmax = (asd(kernel).get_base_kernel().dim == 0)
+        if using_qbmax:
+            # FIXME: do target derivative for QBMAX here
+            pass
 
         result = sum(
             coeff

@@ -1564,6 +1564,13 @@ class AsymptoticallyInformedKernel(KernelWrapper):
                 "needs to know the expansion class.")
         return self.asymptotics._get_scaling_at_target(expn_class)
 
+    def get_pde_as_diff_op(self):
+        r"""Nonlinear scaling breaks the PDE.
+        TODO: compression is still possible for the bulk FMM, by using full
+        Taylor expansion for only qbmax locals.
+        """
+        raise NotImplementedError
+
     def update_persistent_hash(self, key_hash, key_builder):
         for name, value in zip(self.init_arg_names, self.__getinitargs__()):
             if name in ["scaling_expression"]:
@@ -1698,6 +1705,19 @@ class DerivativeCounter(KernelCombineMapper):
 class AsymptoticScalingRemover(KernelIdentityMapper):
     def map_asymptotically_informed_kernel(self, kernel):
         return self.rec(kernel.inner_kernel)
+
+
+class AsymptoticScalingDetector(KernelIdentityMapper):
+    """Swaps base kernel with a placeholder to signal existence of asymptotic
+    information. This is needed because wrappers are typically ordered from
+    inside out as:
+    - base kernel
+    - source derivatives
+    - asymptotic information
+    - target derivatives
+    """
+    def map_asymptotically_informed_kernel(self, kernel):
+        return ExpressionKernel(0, None, None, None)
 
 
 class ExpaniosnClassReplacer(KernelIdentityMapper):
