@@ -1636,6 +1636,13 @@ class KernelIdentityMapper(KernelMapper):
 
     map_directional_source_derivative = map_directional_target_derivative
 
+    def map_asymptotically_informed_kernel(self, kernel):
+        mapped = type(kernel)(
+            self.rec(kernel.inner_kernel),
+            kernel.scaling_expression, kernel.geometric_order,
+            kernel.expansion_class)
+        return mapped
+
 
 class AxisSourceDerivativeRemover(KernelIdentityMapper):
     def map_axis_source_derivative(self, kernel):
@@ -1646,13 +1653,6 @@ class AxisTargetDerivativeRemover(KernelIdentityMapper):
     def map_axis_target_derivative(self, kernel):
         return self.rec(kernel.inner_kernel)
 
-    def map_asymptotically_informed_kernel(self, kernel):
-        mapped = type(kernel)(
-            self.rec(kernel.inner_kernel),
-            kernel.scaling_expression, kernel.geometric_order,
-            kernel.expansion_class)
-        return mapped
-
 
 class TargetDerivativeRemover(AxisTargetDerivativeRemover):
     def map_directional_target_derivative(self, kernel):
@@ -1662,13 +1662,6 @@ class TargetDerivativeRemover(AxisTargetDerivativeRemover):
 class SourceDerivativeRemover(AxisSourceDerivativeRemover):
     def map_directional_source_derivative(self, kernel):
         return self.rec(kernel.inner_kernel)
-
-    def map_asymptotically_informed_kernel(self, kernel):
-        mapped = type(kernel)(
-            self.rec(kernel.inner_kernel),
-            kernel.scaling_expression, kernel.geometric_order,
-            kernel.expansion_class)
-        return mapped
 
 
 class TargetTransformationRemover(TargetDerivativeRemover):
