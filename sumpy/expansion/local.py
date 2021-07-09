@@ -178,45 +178,70 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         if not self.use_rscale:
             rscale = 1
         base_kernel = single_valued(knl.get_base_kernel() for knl in kernels)
+        # TODO: use a kernel mapper to find asymptotic info wrapper that is not the outmost layer
+        from sumpy.kernel import AsymptoticallyInformedKernel
+        using_qbmax = isinstance(base_kernel, AsymptoticallyInformedKernel)
+
+        if using_qbmax and bvec is not None:
+            # bvec is None when, e.g.,
+            # 1) using FMM without QBMAX
+            # 2) using FMM with QBMAX, during P2L
+            #
+            # With a directional expansion (like line taylor), we write:
+            # source to target = (
+            #   source to center (avec) + center to target (bvec)).
+            # Kernel evaluated wrt rad, postprocessed wrt avec,
+            # then take derivatives along the direction of bvec, and
+            # finally let bvec=0
+            rad = avec + bvec
+            post_diff_subs = {bvc: 0 for bvc in bvec}
+        else:
+            base_taker = base_kernel.get_derivative_taker(avec, rscale, sac)
+            post_diff_subs = dict()
+
         result = [0]*len(self)
 
         for knl, weight in zip(kernels, weights):
-            if bvec is not None:
-                # for qbmax
-                # source to center + center to target = source to target
-                # Kernel evaluated wrt rad, postprocessed wrt avec,
-                # then take derivatives along the direction of bvec, and
-                # finally let bvec=0
+            # apply source derivatives, if any
+            if using_qbmax and bvec is not None:
+                # Since DifferentiatedExprDerivativeTaker does not work with
+                # anisotropic expansions, using vanilla expression here is
+                # necessary. That is, the base_taker is directly constructed
+                # from \partial_{n(y)}G(x-y)
                 from sumpy.tools import ExprDerivativeTaker
-                rad = avec + bvec
-                base_taker = ExprDerivativeTaker(
-                    base_kernel.get_expression(rad), bvec, rscale, sac)
+                ppkernel = knl.postprocess_at_source(knl.get_expression(rad), avec)
+                base_taker = ExprDerivativeTaker(ppkernel, bvec, rscale, sac)
+
+                from pytools.tag import tag_dataclass
+
+                @tag_dataclass
+                class AnisotropicDifferentiatedExprDerivativeTaker:
+                    taker: ExprDerivativeTaker
+
+                    def diff(self, mi, save_intermediate=lambda x: x, subs=None):
+                        result = self.taker.diff(mi)
+                        if subs:
+                            result = result.subs(subs)
+                        return result * save_intermediate(1)
+
+                taker = AnisotropicDifferentiatedExprDerivativeTaker(base_taker)
+
+            else:
                 taker = knl.postprocess_at_source(base_taker, avec)
 
+            # Following is a hack to make sure cse works.
+            if 1:
                 def save_temp(x):
                     return add_to_sac(sac, weight * x)
 
                 for i, mi in enumerate(self.get_coefficient_identifiers()):
-                    result[i] += taker.diff(
-                        mi, save_temp, subs={bvc: 0 for bvc in bvec})
+                    result[i] += taker.diff(mi, save_temp, subs=post_diff_subs)
             else:
-                # bvec may be unused at all (None), default to usual qbx
-                # Kernel evaluated and post-processed wrt avec
-                base_taker = base_kernel.get_derivative_taker(avec, rscale, sac)
-                taker = knl.postprocess_at_source(base_taker, avec)
-                # Following is a hack to make sure cse works.
-                if 1:
-                    def save_temp(x):
-                        return add_to_sac(sac, weight * x)
+                def save_temp(x):
+                    return add_to_sac(sac, x)
 
-                    for i, mi in enumerate(self.get_coefficient_identifiers()):
-                        result[i] += taker.diff(mi, save_temp)
-                else:
-                    def save_temp(x):
-                        return add_to_sac(sac, x)
-
-                    for i, mi in enumerate(self.get_coefficient_identifiers()):
-                        result[i] += weight * taker.diff(mi, save_temp)
+                for i, mi in enumerate(self.get_coefficient_identifiers()):
+                    result[i] += weight * taker.diff(mi, save_temp, subs=post_diff_subs)
         return result
 
     def coefficients_from_source(self, kernel, avec, bvec, rscale, sac=None):

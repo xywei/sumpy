@@ -1306,7 +1306,7 @@ class _AsymptoticallyRescaledKernelExpressionFactory:
             self._expr = SympyToPymbolicMapper()(expr)
         else:
             from pymbolic.primitives import Expression
-            assert isinstance(expr, Expression)
+            assert isinstance(expr, (Expression, int))
             self._expr = expr
 
     @property
@@ -1491,7 +1491,7 @@ class AsymptoticallyInformedKernel(KernelWrapper):
             self.scaling_expression = SympyToPymbolicMapper()(scaling_expression)
         else:
             from pymbolic.primitives import Expression
-            assert isinstance(scaling_expression, Expression)
+            assert isinstance(scaling_expression, (Expression, int))
             self.scaling_expression = scaling_expression
 
         self.geometric_order = geometric_order
