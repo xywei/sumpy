@@ -261,21 +261,43 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         bvec_scaled = [b*rscale**-1 for b in bvec]
         from sumpy.tools import mi_power, mi_factorial
 
-        from sumpy.kernel import AsymptoticScalingDetector
+        from sumpy.kernel import AsymptoticScalingDetector, DerivativeCounter
         asd = AsymptoticScalingDetector()
+        dcr = DerivativeCounter()
         using_qbmax = (asd(kernel).get_base_kernel().dim == 0)
+        nder = dcr(kernel)
         if using_qbmax:
             # FIXME: do target derivative for QBMAX here
+            # NOTE: only first order target derivative is implemented
+            if nder > 1:
+                raise NotImplementedError
+            #
+            # Potential = (int[f(x)*G(x,y)dx] * g(y) * g^{-1}(y))'
+            # = Expand{int[f(x)*G(x,y)dx] * g(y)}' / g(y)
+            #    - Expand{int[f(x)*G(x,y)dx] * g(y)} * g'(y)/g^2(y)
+            #:= sum A_n(y) / g(y) - sum B_n(y) * g'(y)/g^2(y)
+            # = sum[A_n(y)/g(y) - B_n(y)*g'(y)/g^2(y)]
+            # = sum[A_n(y) - B_n(y)*g'(y)/g(y)] / g(y)
+            #         ^: A_n are coeffs of usual target derivative
+            #                       ^: B_n are original coeffs
+
+            # get the map from B_n to A_n
+
+            # compute g'(y)/g(y)
+
+            # assemble result
             pass
+        else:
+            result = sum(
+                coeff
+                * mi_power(bvec_scaled, mi, evaluate=False)
+                / mi_factorial(mi)
+                for coeff, mi in zip(
+                        evaluated_coeffs, self.get_full_coefficient_identifiers()))
+            result = kernel.postprocess_at_target(result, bvec)
 
-        result = sum(
-            coeff
-            * mi_power(bvec_scaled, mi, evaluate=False)
-            / mi_factorial(mi)
-            for coeff, mi in zip(
-                    evaluated_coeffs, self.get_full_coefficient_identifiers()))
+        return result
 
-        return kernel.postprocess_at_target(result, bvec)
 
     def m2l_global_precompute_nexpr(self, src_expansion):
         """Returns number of expressions in M2L global precomputation step.
