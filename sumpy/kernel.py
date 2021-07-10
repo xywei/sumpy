@@ -1691,6 +1691,7 @@ class DerivativeCounter(KernelCombineMapper):
     map_helmholtz_kernel = map_expression_kernel
     map_yukawa_kernel = map_expression_kernel
     map_line_of_compression_kernel = map_expression_kernel
+    map_elasticity_kernel = map_expression_kernel
     map_stresslet_kernel = map_expression_kernel
     map_asymptotically_informed_kernel = map_expression_kernel
 
