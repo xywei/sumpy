@@ -77,7 +77,7 @@ class E2PBase(KernelCacheWrapper):
         self.dim = expansion.dim
         self._vector_names = {"b"}
 
-    def get_loopy_insns_and_result_names(self):
+    def get_loopy_insns_and_result_names(self, use_qbmax=False):
         from sumpy.symbolic import make_sym_vector
         bvec = make_sym_vector("b", self.dim)
 
@@ -92,7 +92,8 @@ class E2PBase(KernelCacheWrapper):
 
         result_names = [
             sac.assign_unique("result_%d_p" % i,
-                self.expansion.evaluate(knl, coeff_exprs, bvec, rscale, sac=sac))
+                self.expansion.evaluate(knl, coeff_exprs, bvec, rscale, sac=sac,
+                                        use_qbmax=use_qbmax))
             for i, knl in enumerate(self.kernels)
             ]
 

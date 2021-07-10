@@ -85,7 +85,7 @@ class VolumeTaylorMultipoleExpansionBase(MultipoleExpansionBase):
         return self.coefficients_from_source_vec((kernel,), avec, bvec,
                 rscale, (1,), sac=sac)
 
-    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None, use_qbmax=False):
         if not self.use_rscale:
             rscale = 1
 

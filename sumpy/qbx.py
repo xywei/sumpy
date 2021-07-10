@@ -69,7 +69,7 @@ def stringify_expn_index(i):
 class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
     def __init__(self, ctx, expansion, strength_usage=None,
             value_dtypes=None, name=None, device=None,
-            source_kernels=None, target_kernels=None):
+            source_kernels=None, target_kernels=None, _use_qbmax=False):
 
         from sumpy.kernel import ExpaniosnClassReplacer
         ecr = ExpaniosnClassReplacer(type(expansion))
@@ -84,6 +84,7 @@ class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
         self.dim = single_valued(knl.dim for knl in self.target_kernels)
         self.expansion = expansion
         self._vector_names = {"a", "b"}
+        self._use_qbmax = _use_qbmax
 
     def get_cache_key(self):
         return (type(self).__name__, self.expansion, tuple(self.target_kernels),
@@ -120,8 +121,14 @@ class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
                         coefficients[self.expansion.get_storage_index(i)]))
             for i in self.expansion.get_coefficient_identifiers()]
 
+        if self._use_qbmax is None or self._use_qbmax:
+            use_qbmax = True
+        else:
+            use_qbmax = False
+
         return sac.assign_unique("expn%d_result" % expansion_nr,
-            self.expansion.evaluate(tgt_knl, assigned_coeffs, bvec, rscale))
+            self.expansion.evaluate(tgt_knl, assigned_coeffs, bvec, rscale,
+                                    use_qbmax=use_qbmax))
 
     def get_loopy_insns_and_result_names(self):
         from sumpy.symbolic import make_sym_vector

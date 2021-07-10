@@ -251,7 +251,7 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         return self.coefficients_from_source_vec((kernel,), avec, bvec,
                 rscale=rscale, weights=(1,), sac=sac)
 
-    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None, use_qbmax=False):
         if not self.use_rscale:
             rscale = 1
 
@@ -267,7 +267,9 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         dcr = DerivativeCounter()
         scaling_expr = asg(kernel)
         nder = dcr(kernel)
-        if (scaling_expr is not None) and (nder > 0):
+        # When using FMM, we want to turn off qbmax for the far field,
+        # thus `use_qbmax` must be explicitly set to `True` for qbmax.
+        if use_qbmax and (scaling_expr is not None) and (nder > 0):
             # Target derivatives for qbmax require postprocessing with
             # the Leibniz formula.
             #
