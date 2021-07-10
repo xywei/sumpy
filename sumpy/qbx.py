@@ -71,6 +71,11 @@ class LayerPotentialBase(KernelComputation, KernelCacheWrapper):
             value_dtypes=None, name=None, device=None,
             source_kernels=None, target_kernels=None):
 
+        from sumpy.kernel import ExpaniosnClassReplacer
+        ecr = ExpaniosnClassReplacer(type(expansion))
+        source_kernels = tuple(ecr(sk) for sk in source_kernels)
+        target_kernels = tuple(ecr(tk) for tk in target_kernels)
+
         from pytools import single_valued
         KernelComputation.__init__(self, ctx=ctx, target_kernels=target_kernels,
                 strength_usage=strength_usage, source_kernels=source_kernels,

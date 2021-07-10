@@ -33,12 +33,20 @@ from sumpy.expansion.local import (
         LineTaylorLocalExpansion, VolumeTaylorLocalExpansion)
 import pytest
 
+from sumpy.kernel import LaplaceKernel, AsymptoticallyInformedKernel
 
-@pytest.mark.parametrize("expn_class", [
-            LineTaylorLocalExpansion,
-            VolumeTaylorLocalExpansion,
+import sympy as sp
+dist = sp.Symbol("dist")
+asexpr = sp.exp(-dist)  # no practical use, just to test the machinary
+
+
+@pytest.mark.parametrize("expn_class,lknl", [
+            (LineTaylorLocalExpansion, LaplaceKernel(2)),
+            (VolumeTaylorLocalExpansion, LaplaceKernel(2)),
+            (LineTaylorLocalExpansion, AsymptoticallyInformedKernel(
+                LaplaceKernel(2), asexpr)),
             ])
-def test_direct_qbx_vs_eigval(ctx_factory, expn_class):
+def test_direct_qbx_vs_eigval(ctx_factory, expn_class, lknl):
     """This evaluates a single layer potential on a circle using a known
     eigenvalue/eigenvector combination.
     """
@@ -48,15 +56,12 @@ def test_direct_qbx_vs_eigval(ctx_factory, expn_class):
     ctx = ctx_factory()
     queue = cl.CommandQueue(ctx)
 
-    from sumpy.kernel import LaplaceKernel
-    lknl = LaplaceKernel(2)
-
     order = 12
 
     from sumpy.qbx import LayerPotential
 
     lpot = LayerPotential(ctx, expansion=expn_class(lknl, order),
-            target_kernels=(lknl,), source_kernels=(lknl,))
+                          target_kernels=(lknl,), source_kernels=(lknl,))
 
     mode_nr = 25
 
