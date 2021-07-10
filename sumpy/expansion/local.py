@@ -298,7 +298,6 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
 
         return result
 
-
     def m2l_global_precompute_nexpr(self, src_expansion):
         """Returns number of expressions in M2L global precomputation step.
         """
