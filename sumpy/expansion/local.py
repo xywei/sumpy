@@ -180,8 +180,9 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         base_kernel = single_valued(knl.get_base_kernel() for knl in kernels)
         # TODO: use a kernel mapper to find asymptotic info wrapper that is not
         # the outmost layer
-        from sumpy.kernel import AsymptoticallyInformedKernel
-        using_qbmax = isinstance(base_kernel, AsymptoticallyInformedKernel)
+        from sumpy.kernel import AsymptoticScalingGetter
+        asg = AsymptoticScalingGetter()
+        using_qbmax = (asg(base_kernel) is not None)
 
         if using_qbmax and bvec is not None:
             # bvec is None when, e.g.,
@@ -261,17 +262,21 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         bvec_scaled = [b*rscale**-1 for b in bvec]
         from sumpy.tools import mi_power, mi_factorial
 
-        from sumpy.kernel import AsymptoticScalingDetector, DerivativeCounter
-        asd = AsymptoticScalingDetector()
+        from sumpy.kernel import AsymptoticScalingGetter, DerivativeCounter
+        asg = AsymptoticScalingGetter()
         dcr = DerivativeCounter()
-        using_qbmax = (asd(kernel).get_base_kernel().dim == 0)
+        scaling_expr = asg(kernel)
         nder = dcr(kernel)
-        if using_qbmax:
-            # FIXME: do target derivative for QBMAX here
-            # NOTE: only first order target derivative is implemented
+        if (scaling_expr is not None) and (nder > 0):
+            # Target derivatives for qbmax require postprocessing with
+            # the Leibniz formula.
+            #
+            # NOTE: only first order target derivative is implemented.
+            # The kernel passed to this method during QBX should only have
+            # target derivatives.
             if nder > 1:
                 raise NotImplementedError
-            #
+
             # Potential = (int[f(x)*G(x,y)dx] * g(y) * g^{-1}(y))'
             # = Expand{int[f(x)*G(x,y)dx] * g(y)}' / g(y)
             #    - Expand{int[f(x)*G(x,y)dx] * g(y)} * g'(y)/g^2(y)
@@ -281,12 +286,38 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
             #         ^: A_n are coeffs of usual target derivative
             #                       ^: B_n are original coeffs
 
-            # get the map from B_n to A_n
+            # get the map coefficients at the target
+            expr_dict = {(0,)*self.dim: 1}
+            expr_dict = kernel.get_derivative_transformation_at_target(expr_dict)
 
-            # compute g'(y)/g(y)
+            def orig_term(coeff, mi):  # sympy expr for B_mi
+                # B_mi = (taylor_coeff * rscale^mi) * (((x-center)/rscale)^mi/mi!)
+                #                 ^: coeff
+                return (coeff * mi_power(bvec_scaled, mi, evaluate=False)
+                        / mi_factorial(mi))
 
-            # assemble result
-            pass
+            def tder_term(coeff, mi):  # sympy expr for A_mi
+                expr = orig_term(coeff, mi)
+                return sum(
+                    dcoeff * kernel._diff(expr, bvec, mi)
+                    for mi, dcoeff in expr_dict.items())
+
+            # get sympy expr for g'/g
+            g = 1 / scaling_expr
+            gpog = sum(
+                coeff * kernel._diff(g, bvec, mi) / g
+                for mi, coeff in expr_dict.items())
+
+            def leibniz_term(coeff, mi):
+                ami = tder_term(coeff, mi)
+                bmi = orig_term(coeff, mi)
+                return ami - bmi * gpog
+
+            result = sum(
+                leibniz_term(coeff, mi)
+                for coeff, mi in zip(
+                    evaluated_coeffs, self.get_full_coefficient_identifiers()))
+
         else:
             result = sum(
                 coeff

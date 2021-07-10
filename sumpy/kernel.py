@@ -1708,17 +1708,30 @@ class AsymptoticScalingRemover(KernelIdentityMapper):
         return self.rec(kernel.inner_kernel)
 
 
-class AsymptoticScalingDetector(KernelIdentityMapper):
-    """Swaps base kernel with a placeholder to signal existence of asymptotic
-    information. This is needed because wrappers are typically ordered from
+class AsymptoticScalingGetter(KernelCombineMapper):
+    """This is needed because wrappers are typically ordered from
     inside out as:
     - base kernel
     - source derivatives
     - asymptotic information
     - target derivatives
     """
+    def combine(self, values):
+        return values[0]
+
+    def map_expression_kernel(self, kernel):
+        return None
+
+    map_laplace_kernel = map_expression_kernel
+    map_biharmonic_kernel = map_expression_kernel
+    map_helmholtz_kernel = map_expression_kernel
+    map_yukawa_kernel = map_expression_kernel
+    map_line_of_compression_kernel = map_expression_kernel
+    map_elasticity_kernel = map_expression_kernel
+    map_stresslet_kernel = map_expression_kernel
+
     def map_asymptotically_informed_kernel(self, kernel):
-        return ExpressionKernel(0, None, None, None)
+        return kernel.get_scaling_expression(None)
 
 
 class ExpaniosnClassReplacer(KernelIdentityMapper):
