@@ -142,7 +142,7 @@ class LineTaylorLocalExpansion(LocalExpansionBase):
                     .subs("tau", 0)
                     for i in self.get_coefficient_identifiers()]
 
-    def evaluate(self, tgt_kernel, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, tgt_kernel, coeffs, bvec, rscale, sac=None, use_qbmax=False):
         # no point in heeding rscale here--just ignore it
         from pytools import factorial
         return sym.Add(*(
@@ -720,7 +720,7 @@ class _FourierBesselLocalExpansion(LocalExpansionBase):
                     * sym.exp(sym.I * c * source_angle_rel_center), avec)
                     for c in self.get_coefficient_identifiers()]
 
-    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None, use_qbmax=False):
         if not self.use_rscale:
             rscale = 1
 

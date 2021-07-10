@@ -141,7 +141,7 @@ class ExpansionBase:
                 result[i] += weight * coeffs[i]
         return result
 
-    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None, use_qbmax=False):
         """
         :return: a :mod:`sympy` expression corresponding
             to the evaluated expansion with the coefficients

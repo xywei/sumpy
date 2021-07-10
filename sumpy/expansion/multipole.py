@@ -420,7 +420,7 @@ class _HankelBased2DMultipoleExpansion(MultipoleExpansionBase):
                     avec)
                 for c in self.get_coefficient_identifiers()]
 
-    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None):
+    def evaluate(self, kernel, coeffs, bvec, rscale, sac=None, use_qbmax=False):
         if not self.use_rscale:
             rscale = 1
 
