@@ -334,8 +334,6 @@ class LayerPotential(LayerPotentialBase):
         for knl in self.target_kernels + self.source_kernels:
             loopy_knl = knl.prepare_loopy_kernel(loopy_knl)
 
-        print(loopy_knl)
-
         return loopy_knl
 
     def __call__(self, queue, targets, sources, centers, strengths, expansion_radii,
