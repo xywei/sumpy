@@ -241,8 +241,6 @@ class LayerPotential(LayerPotentialBase):
 
     @memoize_method
     def get_kernel(self):
-        loopy_insns, result_names = self.get_loopy_insns_and_result_names()
-        kernel_exprs = self.get_kernel_exprs(result_names)
         arguments = (
             self.get_default_src_tgt_arguments()
             + [lp.GlobalArg("strength_%d" % i,
@@ -254,12 +252,15 @@ class LayerPotential(LayerPotentialBase):
 
         sats = []
         sat_insns_data = []
+
         for iknl, knl in enumerate(self.target_kernels):
-            try:
-                knl = knl.replace_expansion_class(type(self.expansion))
-                sat_expr = knl.get_scaling_expression(None)
-            except AttributeError:
-                sat_expr = None
+            from sumpy.kernel import AsymptoticScalingGetter, ExpaniosnClassReplacer
+            ecr = ExpaniosnClassReplacer(type(self.expansion))
+            knl = ecr(knl)
+
+            asg = AsymptoticScalingGetter()
+            sat_expr = asg(knl)
+
             if sat_expr:
                 # inject the multiplicative scales of each output kernel
                 sats.append(f"sat_{iknl} * ")
@@ -267,7 +268,26 @@ class LayerPotential(LayerPotentialBase):
             else:
                 sats.append("")
 
+        qbmax_local_temp_insns = []
         if sat_insns_data:
+            # Volume expansion needs normal vector information.
+            # Though using volume expansion, it only evaluates self interaction.
+            # Centers and targets are 1-to-1.
+            from sumpy.expansion import VolumeTaylorExpansionBase
+            if isinstance(self.expansion, VolumeTaylorExpansionBase):
+                qbmax_local_temp_insns = ["""
+                <> normal[idim] = \
+                        nodes_of_qbx_balls_tangency[idim, itgt//2] - \
+                        center[idim, itgt] {dup=idim}
+                """]
+
+                arguments += (
+                    lp.GlobalArg("nodes_of_qbx_balls_tangency", None,
+                        shape=(self.dim, "ntargets"), dim_tags="sep,C"),
+                )
+
+                self._vector_names.add("normal")
+
             from sumpy.codegen import to_loopy_insns
             sat_insns = to_loopy_insns(
                     sat_insns_data,
@@ -276,6 +296,9 @@ class LayerPotential(LayerPotentialBase):
                     complex_dtype=np.complex128)  # FIXME
         else:
             sat_insns = []
+
+        loopy_insns, result_names = self.get_loopy_insns_and_result_names()
+        kernel_exprs = self.get_kernel_exprs(result_names)
 
         loopy_knl = lp.make_kernel(["""
             {[itgt, isrc, idim]: \
@@ -290,8 +313,8 @@ class LayerPotential(LayerPotentialBase):
             + ["<> rscale = expansion_radii[itgt]"]
             + [f"<> strength_{i}_isrc = strength_{i}[isrc]" for i in
                     range(self.strength_count)]
+            + sat_insns + qbmax_local_temp_insns
             + loopy_insns + kernel_exprs
-            + sat_insns
             + ["""
                 result_{i}[itgt] = knl_{i}_scaling * {sat} \
                     simul_reduce(sum, isrc, pair_result_{i}) \
@@ -311,6 +334,8 @@ class LayerPotential(LayerPotentialBase):
         for knl in self.target_kernels + self.source_kernels:
             loopy_knl = knl.prepare_loopy_kernel(loopy_knl)
 
+        print(loopy_knl)
+
         return loopy_knl
 
     def __call__(self, queue, targets, sources, centers, strengths, expansion_radii,
@@ -319,7 +344,6 @@ class LayerPotential(LayerPotentialBase):
         :arg strengths: are required to have area elements and quadrature weights
             already multiplied in.
         """
-
         knl = self.get_cached_optimized_kernel(
                 targets_is_obj_array=is_obj_array_like(targets),
                 sources_is_obj_array=is_obj_array_like(sources),

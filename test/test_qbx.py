@@ -45,6 +45,8 @@ asexpr = sp.exp(-dist)  # no practical use, just to test the machinary
             (VolumeTaylorLocalExpansion, LaplaceKernel(2)),
             (LineTaylorLocalExpansion, AsymptoticallyInformedKernel(
                 LaplaceKernel(2), asexpr)),
+            (VolumeTaylorLocalExpansion, AsymptoticallyInformedKernel(
+                LaplaceKernel(2), asexpr)),
             ])
 def test_direct_qbx_vs_eigval(ctx_factory, expn_class, lknl):
     """This evaluates a single layer potential on a circle using a known
@@ -60,8 +62,11 @@ def test_direct_qbx_vs_eigval(ctx_factory, expn_class, lknl):
 
     from sumpy.qbx import LayerPotential
 
-    lpot = LayerPotential(ctx, expansion=expn_class(lknl, order),
-                          target_kernels=(lknl,), source_kernels=(lknl,))
+    use_qbmax = isinstance(lknl, AsymptoticallyInformedKernel)
+    lpot = LayerPotential(
+        ctx, expansion=expn_class(lknl, order),
+        target_kernels=(lknl,), source_kernels=(lknl,),
+        _use_qbmax=use_qbmax)
 
     mode_nr = 25
 
@@ -89,9 +94,16 @@ def test_direct_qbx_vs_eigval(ctx_factory, expn_class, lknl):
 
         expansion_radii = np.ones(n) * radius
 
+        if use_qbmax and (expn_class is VolumeTaylorLocalExpansion):
+            qbmax_extra_kwargs = {"nodes_of_qbx_balls_tangency": unit_circle}
+        else:
+            qbmax_extra_kwargs = dict()
+
         strengths = (sigma * h,)
-        evt, (result_qbx,) = lpot(queue, targets, sources, centers, strengths,
-                expansion_radii=expansion_radii)
+        evt, (result_qbx,) = lpot(
+            queue, targets, sources, centers, strengths,
+            expansion_radii=expansion_radii,
+            **qbmax_extra_kwargs)
 
         eocrec.add_data_point(h, np.max(np.abs(result_ref - result_qbx)))
 
@@ -101,11 +113,15 @@ def test_direct_qbx_vs_eigval(ctx_factory, expn_class, lknl):
     assert eocrec.order_estimate() > order - slack
 
 
-@pytest.mark.parametrize("expn_class", [
-            LineTaylorLocalExpansion,
-            VolumeTaylorLocalExpansion,
+@pytest.mark.parametrize("expn_class, lknl", [
+            (LineTaylorLocalExpansion, LaplaceKernel(2)),
+            (VolumeTaylorLocalExpansion, LaplaceKernel(2)),
+            (LineTaylorLocalExpansion, AsymptoticallyInformedKernel(
+                LaplaceKernel(2), asexpr)),
+            (VolumeTaylorLocalExpansion, AsymptoticallyInformedKernel(
+                LaplaceKernel(2), asexpr)),
             ])
-def test_direct_qbx_vs_eigval_with_tgt_deriv(ctx_factory, expn_class):
+def test_direct_qbx_vs_eigval_with_tgt_deriv(ctx_factory, expn_class, lknl):
     """This evaluates a single layer potential on a circle using a known
     eigenvalue/eigenvector combination.
     """
@@ -115,17 +131,22 @@ def test_direct_qbx_vs_eigval_with_tgt_deriv(ctx_factory, expn_class):
     ctx = ctx_factory()
     queue = cl.CommandQueue(ctx)
 
-    from sumpy.kernel import LaplaceKernel, AxisTargetDerivative
-    lknl = LaplaceKernel(2)
+    from sumpy.kernel import AxisTargetDerivative
 
     order = 8
 
     from sumpy.qbx import LayerPotential
 
-    lpot_dx = LayerPotential(ctx, expansion=expn_class(lknl, order),
-            target_kernels=(AxisTargetDerivative(0, lknl),), source_kernels=(lknl,))
-    lpot_dy = LayerPotential(ctx, expansion=expn_class(lknl, order),
-            target_kernels=(AxisTargetDerivative(1, lknl),), source_kernels=(lknl,))
+    # explicitly enable _use_qbmax when directly using LayerPotential
+    use_qbmax = isinstance(lknl, AsymptoticallyInformedKernel)
+    lpot_dx = LayerPotential(
+        ctx, expansion=expn_class(lknl, order),
+        target_kernels=(AxisTargetDerivative(0, lknl),), source_kernels=(lknl,),
+        _use_qbmax=use_qbmax)
+    lpot_dy = LayerPotential(
+        ctx, expansion=expn_class(lknl, order),
+        target_kernels=(AxisTargetDerivative(1, lknl),), source_kernels=(lknl,),
+        _use_qbmax=use_qbmax)
 
     mode_nr = 15
 
@@ -156,10 +177,15 @@ def test_direct_qbx_vs_eigval_with_tgt_deriv(ctx_factory, expn_class):
 
         strengths = (sigma * h,)
 
+        if use_qbmax and (expn_class is VolumeTaylorLocalExpansion):
+            qbmax_extra_kwargs = {"nodes_of_qbx_balls_tangency": unit_circle}
+        else:
+            qbmax_extra_kwargs = dict()
+
         evt, (result_qbx_dx,) = lpot_dx(queue, targets, sources, centers, strengths,
-                expansion_radii=expansion_radii)
+                expansion_radii=expansion_radii, **qbmax_extra_kwargs)
         evt, (result_qbx_dy,) = lpot_dy(queue, targets, sources, centers, strengths,
-                expansion_radii=expansion_radii)
+                expansion_radii=expansion_radii, **qbmax_extra_kwargs)
 
         normals = unit_circle
         result_qbx = normals[0] * result_qbx_dx + normals[1] * result_qbx_dy
