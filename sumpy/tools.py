@@ -430,6 +430,29 @@ class DifferentiatedExprDerivativeTaker:
 
         return result * save_intermediate(1 / self.taker.rscale ** max_order)
 
+
+@tag_dataclass
+class AnisotropicDifferentiatedExprDerivativeTaker:
+    """Implements the :class:`ExprDerivativeTaker` interface for an expression
+    that is itself a linear combination of derivatives of a base expression. To
+    take the actual derivatives, it makes use of an underlying derivative taker
+    *taker*.
+
+    Unlike :class:`DifferentiatedExprDerivativeTaker`, the derivatives inside
+    the taker are already evaluated. Because for anisotropic (target-dependent)
+    qbmax expansions, derivative transforms are nonlinear.
+
+    .. attribute:: taker
+        A :class:`ExprDerivativeTaker` for the base expression.
+    """
+    taker: ExprDerivativeTaker
+
+    def diff(self, mi, save_intermediate=lambda x: x, subs=None):
+        result = self.taker.diff(mi)
+        if subs:
+            result = result.subs(subs)
+        return result * save_intermediate(1)
+
 # }}}
 
 

@@ -211,7 +211,7 @@ class Kernel:
             expr = expr.diff(vec[i], mi[i])
         return expr
 
-    def postprocess_at_source(self, expr, avec):
+    def postprocess_at_source(self, expr, avec, bvec=None):
         """Transform a kernel evaluation or expansion expression in a place
         where the vector a (something - source) is known. ("something" may be
         an expansion center or a target.)
@@ -219,12 +219,20 @@ class Kernel:
         The typical use of this function is to apply source-variable
         derivatives to the kernel.
         """
-        from sumpy.tools import (ExprDerivativeTaker,
-            DifferentiatedExprDerivativeTaker)
+        from sumpy.tools import (
+            ExprDerivativeTaker,
+            DifferentiatedExprDerivativeTaker,
+            AnisotropicDifferentiatedExprDerivativeTaker)
+
         expr_dict = {(0,)*self.dim: 1}
         expr_dict = self.get_derivative_transformation_at_source(expr_dict)
+
         if isinstance(expr, ExprDerivativeTaker):
-            return DifferentiatedExprDerivativeTaker(expr, expr_dict)
+            if bvec is not None:
+                # qbmax
+                return AnisotropicDifferentiatedExprDerivativeTaker(expr)
+            else:
+                return DifferentiatedExprDerivativeTaker(expr, expr_dict)
 
         result = 0
         for mi, coeff in expr_dict.items():

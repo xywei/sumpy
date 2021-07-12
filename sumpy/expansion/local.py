@@ -182,54 +182,38 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         # the outmost layer
         from sumpy.kernel import AsymptoticScalingGetter
         asg = AsymptoticScalingGetter()
-        using_qbmax = (asg(base_kernel) is not None)
 
-        if using_qbmax and bvec is not None:
-            # bvec is None when, e.g.,
-            # 1) using FMM without QBMAX
-            # 2) using FMM with QBMAX, during P2L
-            #
+        # bvec is None when
+        # 1) when using FMM without QBMAX
+        # 2) when using FMM with QBMAX, but during GIGAQBX's far-field P2L
+        using_qbmax = (asg(base_kernel) is not None) and (bvec is not None)
+
+        if using_qbmax:
             # With a directional expansion (like line taylor), we write:
             # source to target = (
             #   source to center (avec) + center to target (bvec)).
-            # Kernel evaluated wrt rad, postprocessed wrt avec,
+            # Kernel evaluated wrt rad = avec + bvec, postprocessed wrt avec,
             # then take derivatives along the direction of bvec, and
             # finally let bvec=0
-            rad = avec + bvec
+            base_taker = base_kernel.get_expression(avec + bvec)
             post_diff_subs = {bvc: 0 for bvc in bvec}
         else:
             base_taker = base_kernel.get_derivative_taker(avec, rscale, sac)
             post_diff_subs = dict()
 
         result = [0]*len(self)
-
         for knl, weight in zip(kernels, weights):
             # apply source derivatives, if any
-            if using_qbmax and bvec is not None:
+            if using_qbmax:
                 # Since DifferentiatedExprDerivativeTaker does not work with
                 # anisotropic expansions, using vanilla expression here is
                 # necessary. That is, the base_taker is directly constructed
                 # from \partial_{n(y)}G(x-y)
                 from sumpy.tools import ExprDerivativeTaker
-                ppkernel = knl.postprocess_at_source(knl.get_expression(rad), avec)
+                ppkernel = knl.postprocess_at_source(base_taker, avec, bvec)
                 base_taker = ExprDerivativeTaker(ppkernel, bvec, rscale, sac)
 
-                from pytools.tag import tag_dataclass
-
-                @tag_dataclass
-                class AnisotropicDifferentiatedExprDerivativeTaker:
-                    taker: ExprDerivativeTaker
-
-                    def diff(self, mi, save_intermediate=lambda x: x, subs=None):
-                        result = self.taker.diff(mi)
-                        if subs:
-                            result = result.subs(subs)
-                        return result * save_intermediate(1)
-
-                taker = AnisotropicDifferentiatedExprDerivativeTaker(base_taker)
-
-            else:
-                taker = knl.postprocess_at_source(base_taker, avec)
+            taker = knl.postprocess_at_source(base_taker, avec, bvec)
 
             # Following is a hack to make sure cse works.
             if 1:
