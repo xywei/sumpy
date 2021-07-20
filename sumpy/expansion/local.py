@@ -200,6 +200,8 @@ class VolumeTaylorLocalExpansionBase(LocalExpansionBase):
         else:
             base_taker = base_kernel.get_derivative_taker(avec, rscale, sac)
             post_diff_subs = dict()
+            # to signal postprocess_at_source that we are not using qbmax
+            bvec = None
 
         result = [0]*len(self)
         for knl, weight in zip(kernels, weights):
