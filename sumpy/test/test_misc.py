@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from sumpy.expansion.local import LinearPDEConformingVolumeTaylorLocalExpansion
+
 
 __copyright__ = "Copyright (C) 2017 Andreas Kloeckner"
 
@@ -52,12 +54,16 @@ from sumpy.expansion.diff_op import (
     gradient,
     laplacian,
     make_identity_diff_op,
+    to_fourier_matrix,
 )
 from sumpy.kernel import (
     BiharmonicKernel,
+    BrinkmanletKernel,
+    BrinkmanStressKernel,
     ElasticityKernel,
     ExpressionKernel,
     HelmholtzKernel,
+    Kernel,
     LaplaceKernel,
     LineOfCompressionKernel,
     StokesletKernel,
@@ -87,6 +93,9 @@ class KernelInfo:
         assert len(diff_op.eqs) == 1
         eq = diff_op.eqs[0]
         self.eq = eq
+
+    def __repr__(self) -> str:
+        return str(self.kernel)
 
     def pde_func(self, cp, pot):
         subs_dict = {sym.Symbol(k): v for k, v in self.extra_kwargs.items()}
@@ -127,12 +136,20 @@ class KernelInfo:
     KernelInfo(ElasticityKernel(3, 0, 0), mu=5, nu=0.2),
     KernelInfo(LineOfCompressionKernel(3, 0), mu=5, nu=0.2),
     KernelInfo(LineOfCompressionKernel(3, 1), mu=5, nu=0.2),
-    ])
+    KernelInfo(BrinkmanletKernel(2, 0, 1), mu=5, k=3),
+    KernelInfo(BrinkmanletKernel(2, 1, 1), mu=5, k=3),
+    KernelInfo(BrinkmanletKernel(3, 0, 1), mu=5, k=3),
+    KernelInfo(BrinkmanletKernel(3, 1, 1), mu=5, k=3),
+    KernelInfo(BrinkmanStressKernel(2, 0, 1, 0), mu=5, k=3),
+    KernelInfo(BrinkmanStressKernel(2, 0, 1, 1), mu=5, k=3),
+    KernelInfo(BrinkmanStressKernel(3, 0, 1, 0), mu=5, k=3),
+    KernelInfo(BrinkmanStressKernel(3, 0, 1, 2), mu=5, k=3),
+    ], ids=repr)
 def test_pde_check_kernels(actx_factory: ArrayContextFactory, knl_info, order=5):
     actx = actx_factory()
 
     dim = knl_info.kernel.dim
-    tctx = t.ToyContext(actx.context, knl_info.kernel,
+    tctx = t.ToyContext(knl_info.kernel,
             extra_source_kwargs=knl_info.extra_kwargs)
 
     rng = np.random.default_rng(42)
@@ -148,7 +165,7 @@ def test_pde_check_kernels(actx_factory: ArrayContextFactory, knl_info, order=5)
 
     for h in [0.1, 0.05, 0.025]:
         cp = CalculusPatch(np.array([1, 0, 0])[:dim], h=h, order=order)
-        pot = pt_src.eval(cp.points)
+        pot = pt_src.eval(actx, cp.points)
 
         pde = knl_info.pde_func(cp, pot)
 
@@ -197,7 +214,7 @@ class FakeTree:
 @pytest.mark.parametrize("knl", [
         LaplaceKernel(2), HelmholtzKernel(2),
         LaplaceKernel(3), HelmholtzKernel(3)])
-def test_order_finder(knl):
+def test_order_finder(knl: Kernel) -> None:
     from sumpy.expansion.level_to_order import SimpleExpansionOrderFinder
 
     ofind = SimpleExpansionOrderFinder(1e-5)
@@ -331,7 +348,7 @@ def test_toy_p2e2e2p(actx_factory: ArrayContextFactory, case):
     from sumpy.expansion import VolumeTaylorExpansionFactory
 
     actx = actx_factory()
-    ctx = t.ToyContext(actx.context,
+    ctx = t.ToyContext(
              LaplaceKernel(dim),
              expansion_factory=VolumeTaylorExpansionFactory(),
              m2l_use_fft=case.m2l_use_fft)
@@ -339,12 +356,12 @@ def test_toy_p2e2e2p(actx_factory: ArrayContextFactory, case):
     errors = []
 
     src_pot = t.PointSources(ctx, src, weights=np.array([1.]))
-    pot_actual = src_pot.eval(tgt).item()
+    pot_actual = src_pot.eval(actx, tgt).item()
 
     for order in ORDERS_P2E2E2P:
-        expn = case.expansion1(src_pot, case.center1, order=order)
-        expn2 = case.expansion2(expn, case.center2, order=order)
-        pot_p2e2e2p = expn2.eval(tgt).item()
+        expn = case.expansion1(actx, src_pot, case.center1, order=order)
+        expn2 = case.expansion2(actx, expn, case.center2, order=order)
+        pot_p2e2e2p = expn2.eval(actx, tgt).item()
         errors.append(np.abs(pot_actual - pot_p2e2e2p))
 
     conv_factor = approx_convergence_factor(1 + np.array(ORDERS_P2E2E2P), errors)
@@ -378,12 +395,12 @@ def test_cse_matvec():
     rng = np.random.default_rng(42)
     vec = rng.random(2)
     expected_result = m @ vec
-    actual_result = op.matvec(vec)
+    actual_result = [float(x) for x in op.matvec(vec)]
     assert np.allclose(expected_result, actual_result)
 
     vec = rng.random(4)
     expected_result = m.T @ vec
-    actual_result = op.transpose_matvec(vec)
+    actual_result = [float(x) for x in op.transpose_matvec(vec)]
     assert np.allclose(expected_result, actual_result)
 
 # }}}
@@ -459,7 +476,6 @@ def test_as_scalar_pde_maxwell():
 # {{{ test_as_scalar_pde_elasticity
 
 def test_as_scalar_pde_elasticity():
-
     # Ref: https://doi.org/10.1006/jcph.1996.0102
 
     diff_op = make_identity_diff_op(2, 5)
@@ -476,40 +492,204 @@ def test_as_scalar_pde_elasticity():
     x = (1, 0)
     y = (0, 1)
 
-    exprs = [
+    pde = concat(*[
         diff(sigma_x, x) + diff(tau, y),
         diff(tau, x) + diff(sigma_y, y),
         sigma_x - (lam + 2*mu)*diff(u, x) - lam*diff(v, y),
         sigma_y - (lam + 2*mu)*diff(v, y) - lam*diff(u, x),
         tau - mu*(diff(u, y) + diff(v, x)),
-    ]
+    ])
 
-    pde = concat(*exprs)
     assert pde.order == 1
     for i in range(5):
         scalar_pde = as_scalar_pde(pde, i)
         assert scalar_pde == laplacian(laplacian(diff_op[0]))
         assert scalar_pde.order == 4
 
+    # Wikipedia: displacement formulation
+
+    u = make_identity_diff_op(3, 3)
+    pde = mu * laplacian(u) + (mu + lam) * gradient(divergence(u))
+
+    for i in range(3):
+        scalar_pde = as_scalar_pde(pde, i)
+        assert scalar_pde == laplacian(laplacian(u[0]))
+
 # }}}
 
 
-# {{{ test_elasticity_new
+# {{{ test_as_scalar_pde_brinkman
 
-def test_elasticity_new():
+def test_as_scalar_pde_brinkman():
+    dim = 3
+    mu = sym.Symbol("mu")
+    k = sym.Symbol("k")
+
+    # NOTE: momentum + incompressibility equations
+    diff_op = make_identity_diff_op(dim, dim + 1)
+    u = diff_op[:3]
+    p = diff_op[3]
+    pde = concat(mu * (laplacian(u) - k**2 * u) - gradient(p), divergence(u))
+
+    # velocity components in Brinkman should satisfy Yukawa
+    for i in range(3):
+        scalar_pde = as_scalar_pde(pde, i)
+
+        logger.info("pde\n%s", scalar_pde)
+        logger.info("\n%s", laplacian(laplacian(u[i])))
+        assert scalar_pde == laplacian(laplacian(u[0]) - k**2 * u[0])
+
+    # pressure should satisfy Laplace
+    assert as_scalar_pde(pde, 3) == laplacian(u[0])
+
+# }}}
+
+
+# {{{ test_elasticity_pickle
+
+def test_elasticity_pickle():
     from pickle import dumps, loads
-    stokes_knl = StokesletKernel(3, 0, 1, "mu1", 0.5)
-    stokes_knl2 = ElasticityKernel(3, 0, 1, "mu1", 0.5)
-    elasticity_knl = ElasticityKernel(3, 0, 1, "mu1", "nu")
-    elasticity_helper_knl = LineOfCompressionKernel(3, 0, "mu1", "nu")
+    stokes_knl = StokesletKernel(
+        3, 0, 1, viscosity_mu_name="mu1")
+    elasticity_knl = ElasticityKernel(
+        3, 0, 1, viscosity_mu_name="mu1", poisson_ratio_name="nu1")
+    elasticity_helper_knl = LineOfCompressionKernel(
+        3, 0, viscosity_mu_name="mu1", poisson_ratio_name="nu1")
 
-    assert isinstance(stokes_knl2, StokesletKernel)
-    assert stokes_knl == stokes_knl2
     assert loads(dumps(stokes_knl)) == stokes_knl
+    assert loads(dumps(elasticity_knl)) == elasticity_knl
+    assert loads(dumps(elasticity_helper_knl)) == elasticity_helper_knl
 
-    for knl in [elasticity_knl, elasticity_helper_knl]:
-        assert not isinstance(knl, StokesletKernel)
-        assert loads(dumps(knl)) == knl
+# }}}
+
+
+# {{{ test_to_fourier_matrix_laplace
+
+def test_to_fourier_matrix_scalar() -> None:
+    ks = sym.make_sym_vector("k", 3)
+    lam = sym.Symbol("lam")
+
+    # LaplaceKernel
+    kernel = LaplaceKernel(2)
+    mat = to_fourier_matrix(kernel.get_pde_as_diff_op(), ks)
+    assert mat == sym.Matrix([[-ks[0]**2 - ks[1]**2]])
+
+    kernel = LaplaceKernel(3)
+    mat = to_fourier_matrix(kernel.get_pde_as_diff_op(), ks)
+    assert mat == sym.Matrix([[-ks[0]**2 - ks[1]**2 - ks[2]**2]])
+
+    # YukawaKernel
+    kernel = YukawaKernel(2, yukawa_lambda_name=lam.name)
+    mat = to_fourier_matrix(kernel.get_pde_as_diff_op(), ks)
+    assert mat == sym.Matrix([[-ks[0]**2 - ks[1]**2 - lam**2]])
+
+    kernel = YukawaKernel(3, yukawa_lambda_name=lam.name)
+    mat = to_fourier_matrix(kernel.get_pde_as_diff_op(), ks)
+    assert mat == sym.Matrix([[-ks[0]**2 - ks[1]**2 - ks[2]**2 - lam**2]])
+
+# }}}
+
+
+# {{{ test_to_fourier_matrix_stokes
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_to_fourier_matrix_stokes(dim: int) -> None:
+    ks = sym.make_sym_vector("k", dim)
+    mu = sym.Symbol("mu")
+
+    diff_op = make_identity_diff_op(dim, dim + 1)
+    u = diff_op[:dim]
+    p = diff_op[dim]
+    pde = concat(mu * laplacian(u) - gradient(p), divergence(u))
+
+    k_sqr = sum(k**2 for k in ks)
+    if dim == 2:
+        expected = sym.Matrix([
+            [-mu * k_sqr, 0, -sym.I*ks[0]],
+            [0, -mu * k_sqr, -sym.I*ks[1]],
+            [sym.I*ks[0], sym.I*ks[1], 0],
+        ])
+    elif dim == 3:
+        expected = sym.Matrix([
+            [-mu * k_sqr, 0, 0, -sym.I*ks[0]],
+            [0, -mu * k_sqr, 0, -sym.I*ks[1]],
+            [0, 0, -mu * k_sqr, -sym.I*ks[2]],
+            [sym.I*ks[0], sym.I*ks[1], sym.I*ks[2], 0],
+        ])
+    else:
+        raise ValueError(f"unsupported dimension: {dim}")
+
+    mat = to_fourier_matrix(pde, ks)
+    assert mat.expand() == expected.expand()
+
+# }}}
+
+
+# {{{ test_to_fourier_matrix_elasticity
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_to_fourier_matrix_elasticity(dim: int) -> None:
+    ks = sym.make_sym_vector("k", dim)
+    mu = sym.Symbol("mu")
+    nu = sym.Symbol("nu")
+    mn = mu / (1 - 2 * nu)
+
+    u = make_identity_diff_op(dim, dim)
+    pde = mu * laplacian(u) + mn * gradient(divergence(u))
+
+    k_sqr = sum(k**2 for k in ks)
+    if dim == 2:
+        expected = sym.Matrix([
+            [-mu * k_sqr - mn * ks[0]**2, -mn * ks[0] * ks[1]],
+            [-mn * ks[1] * ks[0], -mu * k_sqr - mn * ks[1]**2],
+        ])
+    elif dim == 3:
+        expected = sym.Matrix([
+            [-mu * k_sqr - mn * ks[0]**2, -mn * ks[0] * ks[1], -mn * ks[0] * ks[2]],
+            [-mn * ks[1] * ks[0], -mu * k_sqr - mn * ks[1]**2, -mn * ks[1] * ks[2]],
+            [-mn * ks[2] * ks[0], -mn * ks[2] * ks[1], -mu * k_sqr - mn * ks[2]**2],
+        ])
+    else:
+        raise ValueError(f"unsupported dimension: {dim}")
+
+    mat = to_fourier_matrix(pde, ks)
+    assert mat.expand() == expected.expand()
+
+# }}}
+
+
+# {{{ test_to_fourier_matrix_brinkman
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_to_fourier_matrix_brinkman(dim: int) -> None:
+    ks = sym.make_sym_vector("k", dim)
+    mu = sym.Symbol("mu")
+    kappa = sym.Symbol("k")
+
+    diff_op = make_identity_diff_op(dim, dim + 1)
+    u = diff_op[:dim]
+    p = diff_op[dim]
+    pde = concat(mu * (laplacian(u) - kappa**2 * u) - gradient(p), divergence(u))
+
+    k_sqr = sum(k**2 for k in ks)
+    if dim == 2:
+        expected = sym.Matrix([
+            [mu * (-k_sqr - kappa**2), 0, -sym.I*ks[0]],
+            [0, mu * (-k_sqr - kappa**2), -sym.I*ks[1]],
+            [sym.I*ks[0], sym.I*ks[1], 0],
+        ])
+    elif dim == 3:
+        expected = sym.Matrix([
+            [mu * (-k_sqr - kappa**2), 0, 0, -sym.I*ks[0]],
+            [0, mu * (-k_sqr - kappa**2), 0, -sym.I*ks[1]],
+            [0, 0, mu * (-k_sqr - kappa**2), -sym.I*ks[2]],
+            [sym.I*ks[0], sym.I*ks[1], sym.I*ks[2], 0],
+        ])
+    else:
+        raise ValueError(f"unsupported dimension: {dim}")
+
+    mat = to_fourier_matrix(pde, ks)
+    assert mat.expand() == expected.expand()
 
 # }}}
 
@@ -542,11 +722,9 @@ def test_weird_kernel(pde):
     from functools import reduce
     from operator import mul
 
-    from sumpy.expansion import LinearPDEConformingVolumeTaylorExpansion
-
     knl = MyKernel()
     order = 10
-    expn = LinearPDEConformingVolumeTaylorExpansion(kernel=knl,
+    expn = LinearPDEConformingVolumeTaylorLocalExpansion(kernel=knl,
             order=order, use_rscale=False)
 
     coeffs = expn.get_coefficient_identifiers()
@@ -572,8 +750,7 @@ class StorageIndexTestKernel(ExpressionKernel):
     @override
     def get_pde_as_diff_op(self):
         w = make_identity_diff_op(self.dim)
-        pde = diff(w, tuple(self._max_mi))
-        return pde
+        return diff(w, tuple(self._max_mi))
 
 
 @pytest.mark.parametrize("order", [6])
@@ -592,9 +769,9 @@ class StorageIndexTestKernel(ExpressionKernel):
 def test_get_storage_index(order, knl, compressed):
     dim = knl.dim
     if compressed:
-        wrangler = LinearPDEBasedExpansionTermsWrangler(order, dim, knl=knl)
+        wrangler = LinearPDEBasedExpansionTermsWrangler(order, dim, None, knl=knl)
     else:
-        wrangler = FullExpansionTermsWrangler(order, dim)
+        wrangler = FullExpansionTermsWrangler(order, dim, max_mi=None)
     for i, mi in enumerate(wrangler.get_coefficient_identifiers()):
         assert i == wrangler.get_storage_index(mi)
 

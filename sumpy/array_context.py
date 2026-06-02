@@ -23,43 +23,112 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 """
 
-from boxtree.array_context import PyOpenCLArrayContext as PyOpenCLArrayContextBase
+from typing import TYPE_CHECKING, Any
 
+from boxtree.array_context import PyOpenCLArrayContext as PyOpenCLArrayContextBase
+from typing_extensions import override
+
+import loopy as lp
 from arraycontext.pytest import (
     _PytestPyOpenCLArrayContextFactoryWithClass,
     register_pytest_array_context_factory,
 )
 
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+    import islpy
+    from numpy.typing import DTypeLike
+
+    from arraycontext import ArrayContext
+    from loopy import TranslationUnit
+    from loopy.codegen import PreambleInfo
+    from loopy.kernel.instruction import InstructionBase
+    from pytools.tag import ToTagSetConvertible
+
+
 __doc__ = """
 Array Context
 -------------
 
+.. autofunction:: make_loopy_program
 .. autoclass:: PyOpenCLArrayContext
 """
 
 
 # {{{ PyOpenCLArrayContext
 
+def make_loopy_program(
+        domains: str | Sequence[str | islpy.BasicSet],
+        statements: Sequence[InstructionBase | str] | str,
+        kernel_data: list[Any] | None = None, *,
+        name: str = "sumpy_loopy_kernel",
+        silenced_warnings: list[str] | str | None = None,
+        assumptions: str = "",
+        fixed_parameters: dict[str, Any] | None = None,
+        index_dtype: DTypeLike | None = None,
+        tags: ToTagSetConvertible = None):
+    """Return a :class:`loopy.LoopKernel` suitable for use with
+    :meth:`arraycontext.ArrayContext.call_loopy`.
+    """
+    if kernel_data is None:
+        kernel_data = [...]
+
+    if silenced_warnings is None:
+        silenced_warnings = []
+
+    import loopy as lp
+    from arraycontext.loopy import _DEFAULT_LOOPY_OPTIONS
+
+    return lp.make_kernel(
+            domains,
+            statements,
+            kernel_data=kernel_data,
+            options=_DEFAULT_LOOPY_OPTIONS,
+            default_offset=lp.auto,
+            name=name,
+            lang_version=lp.MOST_RECENT_LANGUAGE_VERSION,
+            assumptions=assumptions,
+            fixed_parameters=fixed_parameters,
+            silenced_warnings=silenced_warnings,
+            index_dtype=index_dtype,
+            tags=tags)
+
+
+def _fp_contract_fast_preamble(
+        preamble_info: PreambleInfo
+    ) -> Iterator[tuple[str, str]]:
+    yield ("fp_contract_fast_pocl", "#pragma clang fp contract(fast)")
+
+
 class PyOpenCLArrayContext(PyOpenCLArrayContextBase):
-    def transform_loopy_program(self, t_unit):
-        default_ep = t_unit.default_entrypoint
-        options = default_ep.options
+    @override
+    def transform_loopy_program(self, t_unit: TranslationUnit):
+        import pyopencl as cl
+        device = self.queue.device
+        if (device.platform.name == "Portable Computing Language"
+                and (device.type & cl.device_type.GPU)):
+            t_unit = lp.register_preamble_generators(
+                t_unit,
+                [_fp_contract_fast_preamble])
 
-        if not (options.return_dict and options.no_numpy):
-            raise ValueError("Loopy kernel passed to call_loopy must "
-                    "have return_dict and no_numpy options set. "
-                    "Did you use arraycontext.make_loopy_program "
-                    "to create this kernel?")
+        return t_unit
 
-        return super().transform_loopy_program(t_unit)
+
+def is_cl_cpu(actx: ArrayContext) -> bool:
+    if not isinstance(actx, PyOpenCLArrayContext):
+        return False
+
+    import pyopencl as cl
+    return all(dev.type & cl.device_type.CPU for dev in actx.context.devices)
 
 # }}}
 
 
 # {{{ pytest
 
-def _acf():
+def _acf() -> ArrayContext:
     import pyopencl as cl
     ctx = cl.create_some_context()
     queue = cl.CommandQueue(ctx)
@@ -69,9 +138,13 @@ def _acf():
 
 class PytestPyOpenCLArrayContextFactory(
         _PytestPyOpenCLArrayContextFactoryWithClass):
-    actx_class = PyOpenCLArrayContext
+    @property
+    @override
+    def actx_class(self) -> type[ArrayContext]:
+        return PyOpenCLArrayContext
 
-    def __call__(self):
+    @override
+    def __call__(self) -> ArrayContext:
         # NOTE: prevent any cache explosions during testing!
         from sympy.core.cache import clear_cache
         clear_cache()

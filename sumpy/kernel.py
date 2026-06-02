@@ -31,14 +31,13 @@ from typing import (
     ClassVar,
     Generic,
     Literal,
-    TypeAlias,
     TypeVar,
     cast,
     overload,
 )
 
 import numpy as np
-from typing_extensions import override
+from typing_extensions import Self, override
 
 import loopy as lp
 import pymbolic.primitives as prim
@@ -68,8 +67,6 @@ if TYPE_CHECKING:
 __doc__ = """
 Kernel interface
 ----------------
-
-.. autoclass:: ArithmeticExpr
 
 .. autoclass:: KernelArgument
 .. autoclass:: Kernel
@@ -109,6 +106,24 @@ PDE kernels
 .. autoclass:: LineOfCompressionKernel
     :show-inheritance:
     :members: mapper_method
+.. autoclass:: BrinkmanletKernel
+    :show-inheritance:
+    :members: mapper_method
+.. autoclass:: BrinkmanStressKernel
+    :show-inheritance:
+    :members: mapper_method
+
+.. [Pozrikidis1992] C. Pozrikidis,
+    *Boundary Integral and Singularity Methods for Linearized Viscous Flow*,
+    Cambridge University Press, 1992.
+
+.. [Hsiao2008] G. C. Hsiao, W. L. Wendland,
+    *Boundary Integral Equations*,
+    Springer, 2008.
+
+.. [Kress2013] R. Kress,
+    *Linear Integral Equations*,
+    Springer Science & Business Media, 2013.
 
 Derivatives
 -----------
@@ -159,8 +174,6 @@ Transforming kernels
 .. autoclass:: DerivativeCounter
     :show-inheritance:
 """
-
-ArithmeticExpr: TypeAlias = int | float | complex | sym.Basic
 
 
 @dataclass(frozen=True)
@@ -219,6 +232,20 @@ class Kernel(ABC):
     def is_complex_valued(self) -> bool:
         """A boolean flag indicating whether this kernel is complex valued."""
 
+    @override
+    def __repr__(self) -> str:
+        from dataclasses import fields
+
+        args: list[str] = []
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if isinstance(value, prim.ExpressionNode):
+                args.append(f"{f.name}={value}")
+            else:
+                args.append(f"{f.name}={value!r}")
+
+        return f"{type(self).__name__}({', '.join(args)})"
+
     def get_base_kernel(self) -> Kernel:
         """
         :returns: the kernel being wrapped by this one, or else *self*.
@@ -248,7 +275,7 @@ class Kernel(ABC):
         return lambda expr: expr
 
     @abstractmethod
-    def get_expression(self, dist_vec: sp.Matrix) -> ArithmeticExpr:
+    def get_expression(self, dist_vec: sym.Matrix) -> sym.Expr:
         """
         :returns: a :mod:`sympy` expression for the kernel.
         """
@@ -277,8 +304,8 @@ class Kernel(ABC):
     def get_derivative_taker(
             self,
             dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         """
         :returns: an :class:`~sumpy.derivative_taker.ExprDerivativeTaker` instance
@@ -288,16 +315,16 @@ class Kernel(ABC):
 
     @overload
     def postprocess_at_source(
-            self, expr: sym.Expr, avec: sp.Matrix
+            self, expr: sym.Expr, avec: sym.Matrix
         ) -> sym.Expr: ...
 
     @overload
     def postprocess_at_source(
-            self, expr: ExprDerivativeTaker, avec: sp.Matrix
+            self, expr: ExprDerivativeTaker, avec: sym.Matrix
         ) -> DifferentiatedExprDerivativeTaker: ...
 
     def postprocess_at_source(
-            self, expr: sym.Expr | ExprDerivativeTaker, avec: sp.Matrix,
+            self, expr: sym.Expr | ExprDerivativeTaker, avec: sym.Matrix,
         ) -> sym.Expr | DifferentiatedExprDerivativeTaker:
         """Transform a kernel evaluation or expansion expression in a place
         where the vector :math:`a` (something - source) is known. ("something" may be
@@ -320,17 +347,20 @@ class Kernel(ABC):
 
     @overload
     def postprocess_at_target(
-            self, expr: sym.Expr, bvec: sp.Matrix,
+            self, expr: sym.Expr, bvec: sym.Matrix,
         ) -> sym.Expr: ...
 
     @overload
     def postprocess_at_target(
-            self, expr: ExprDerivativeTaker, bvec: sp.Matrix,
+            self, expr: ExprDerivativeTaker | DifferentiatedExprDerivativeTaker,
+            bvec: sym.Matrix,
         ) -> DifferentiatedExprDerivativeTaker: ...
 
-    def postprocess_at_target(
-            self, expr: sym.Expr | ExprDerivativeTaker, bvec: sp.Matrix,
-        ) -> sym.Expr | DifferentiatedExprDerivativeTaker:
+    def postprocess_at_target(self,
+                expr:
+                    sym.Expr | ExprDerivativeTaker | DifferentiatedExprDerivativeTaker,
+                bvec: sym.Matrix,
+            ) -> sym.Expr | DifferentiatedExprDerivativeTaker:
         """Transform a kernel evaluation or expansion expression in a place
         where the vector :math:`b` (target - something) is known. ("something" may
         be an expansion center or a target.)
@@ -354,7 +384,7 @@ class Kernel(ABC):
         return expr_dict
 
     @abstractmethod
-    def get_global_scaling_const(self) -> ArithmeticExpr:
+    def get_global_scaling_const(self) -> sym.Expr:
         r"""A global scaling constant of the kernel.
 
         Typically, this ensures that the kernel is scaled so that
@@ -381,7 +411,7 @@ class Kernel(ABC):
 # }}}
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ExpressionKernel(Kernel, ABC):
     r"""
     .. autoattribute:: expression
@@ -412,9 +442,9 @@ class ExpressionKernel(Kernel, ABC):
         return f"ExprKnl{self.dim}D"
 
     @override
-    def get_expression(self, dist_vec: sp.Matrix) -> ArithmeticExpr:
+    def get_expression(self, dist_vec: sym.Matrix) -> sym.Expr:
         from sumpy.symbolic import PymbolicToSympyMapperWithSymbols
-        expr = PymbolicToSympyMapperWithSymbols()(self.expression)
+        expr = PymbolicToSympyMapperWithSymbols().to_expr(self.expression)
 
         if self.dim != len(dist_vec):
             raise ValueError(
@@ -422,24 +452,22 @@ class ExpressionKernel(Kernel, ABC):
                 f"kernel dim is '{self.dim}' and dist_vec has length '{len(dist_vec)}'")
 
         from sumpy.symbolic import Symbol
-        expr = expr.xreplace({
+        return expr.xreplace({
             Symbol(f"d{i}"): dist_vec_i
             for i, dist_vec_i in enumerate(dist_vec)
             })
 
-        return expr
-
     @override
-    def get_global_scaling_const(self) -> ArithmeticExpr:
+    def get_global_scaling_const(self) -> sym.Expr:
         from sumpy.symbolic import PymbolicToSympyMapperWithSymbols
-        return PymbolicToSympyMapperWithSymbols()(self.global_scaling_const)
+        return PymbolicToSympyMapperWithSymbols().to_expr(self.global_scaling_const)
 
     @override
     def get_derivative_taker(
             self,
-            dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+            dvec: sym.Matrix,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         return ExprDerivativeTaker(self.get_expression(dvec), dvec, rscale, sac)
 
@@ -456,6 +484,10 @@ class OneKernel(ExpressionKernel):
             global_scaling_const=1,
         )
 
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (self.__class__, (self.dim,))
+
     @property
     @override
     def is_complex_valued(self) -> bool:
@@ -469,6 +501,13 @@ one_kernel_3d = OneKernel(3)
 # {{{ PDE kernels
 
 class LaplaceKernel(ExpressionKernel):
+    r"""A kernel for the Laplace equation (see e.g. Theorem 6.2 from [Kress2013]_).
+
+    .. math::
+
+        \Delta K(\mathbf{x}, \mathbf{y}) = \delta(\mathbf{x} - \mathbf{y}).
+    """
+
     mapper_method: ClassVar[str] = "map_laplace_kernel"
 
     def __init__(self, dim: int) -> None:
@@ -486,6 +525,10 @@ class LaplaceKernel(ExpressionKernel):
 
         super().__init__(dim, expression=expr, global_scaling_const=scaling)
 
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (self.__class__, (self.dim,))
+
     @property
     @override
     def is_complex_valued(self) -> bool:
@@ -498,9 +541,9 @@ class LaplaceKernel(ExpressionKernel):
     @override
     def get_derivative_taker(
             self,
-            dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+            dvec: sym.Matrix,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         from sumpy.derivative_taker import LaplaceDerivativeTaker
         return LaplaceDerivativeTaker(self.get_expression(dvec), dvec, rscale, sac)
@@ -513,6 +556,13 @@ class LaplaceKernel(ExpressionKernel):
 
 
 class BiharmonicKernel(ExpressionKernel):
+    r"""A kernel for the biharmonic equation.
+
+    .. math::
+
+        \Delta^2 K(\mathbf{x}, \mathbf{y}) = \delta(\mathbf{x} - \mathbf{y}).
+    """
+
     mapper_method: ClassVar[str] = "map_biharmonic_kernel"
 
     def __init__(self, dim: int) -> None:
@@ -535,6 +585,10 @@ class BiharmonicKernel(ExpressionKernel):
 
         super().__init__(dim, expression=expr, global_scaling_const=scaling)
 
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (self.__class__, (self.dim,))
+
     @property
     @override
     def is_complex_valued(self) -> bool:
@@ -548,8 +602,8 @@ class BiharmonicKernel(ExpressionKernel):
     def get_derivative_taker(
             self,
             dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         from sumpy.derivative_taker import RadialDerivativeTaker
         return RadialDerivativeTaker(self.get_expression(dvec), dvec, rscale, sac)
@@ -561,9 +615,15 @@ class BiharmonicKernel(ExpressionKernel):
         return laplacian(laplacian(w))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class HelmholtzKernel(ExpressionKernel):
-    """
+    r"""A kernel for the Helmholtz equation (see e.g. Example 12.14 in [Kress2013]_).
+
+    .. math::
+
+        \Delta K(\mathbf{x}, \mathbf{y}) + k^2 K(\mathbf{x}, \mathbf{y})
+            = \delta(\mathbf{x} - \mathbf{y}).
+
     .. autoattribute:: helmholtz_k_name
     .. autoattribute:: allow_evanescent
     """
@@ -601,6 +661,13 @@ class HelmholtzKernel(ExpressionKernel):
         object.__setattr__(self, "helmholtz_k_name", helmholtz_k_name)
         object.__setattr__(self, "allow_evanescent", allow_evanescent)
 
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (
+            self.__class__,
+            (self.dim, self.helmholtz_k_name, self.allow_evanescent),
+        )
+
     @property
     @override
     def is_complex_valued(self) -> bool:
@@ -626,9 +693,9 @@ class HelmholtzKernel(ExpressionKernel):
     @override
     def get_derivative_taker(
             self,
-            dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+            dvec: sym.Matrix,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         from sumpy.derivative_taker import HelmholtzDerivativeTaker
         return HelmholtzDerivativeTaker(self.get_expression(dvec), dvec, rscale, sac)
@@ -642,9 +709,15 @@ class HelmholtzKernel(ExpressionKernel):
         return laplacian(w) + k**2 * w
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class YukawaKernel(ExpressionKernel):
-    """
+    r"""A kernel for the Yukawa equation.
+
+    .. math::
+
+        \Delta K(\mathbf{x}, \mathbf{y}) - \lambda^2 K(\mathbf{x}, \mathbf{y})
+            = \delta(\mathbf{x} - \mathbf{y}).
+
     .. autoattribute:: yukawa_lambda_name
     """
 
@@ -688,10 +761,14 @@ class YukawaKernel(ExpressionKernel):
         super().__init__(dim, expression=expr, global_scaling_const=scaling)
         object.__setattr__(self, "yukawa_lambda_name", yukawa_lambda_name)
 
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (self.__class__, (self.dim, self.yukawa_lambda_name))
+
     @property
     @override
     def is_complex_valued(self) -> bool:
-        # FIXME
+        # FIXME: 2D uses Hankel functions (complex-valued); 3D uses real exp
         return True
 
     @override
@@ -713,9 +790,9 @@ class YukawaKernel(ExpressionKernel):
     @override
     def get_derivative_taker(
             self,
-            dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+            dvec: sym.Matrix,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         from sumpy.derivative_taker import HelmholtzDerivativeTaker
         return HelmholtzDerivativeTaker(self.get_expression(dvec), dvec, rscale, sac)
@@ -729,14 +806,23 @@ class YukawaKernel(ExpressionKernel):
         return laplacian(w) - lam**2 * w
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class ElasticityKernel(ExpressionKernel):
-    """
+    r"""A kernel for the linear elasticity (Navier-Cauchy) equations
+    (see e.g. Section 2.2 in [Hsiao2008]_).
+
+    .. math::
+
+        \mu \Delta K_{ij}(\mathbf{x}, \mathbf{y})
+        + \frac{\mu}{1 - 2 \nu} \nabla (\nabla \cdot K_{ij}(\mathbf{x}, \mathbf{y}))
+        = \delta_{ij} \delta(\mathbf{x} - \mathbf{y}).
+
     .. autoattribute:: icomp
     .. autoattribute:: jcomp
-    .. autoattribute:: viscosity_mu
-    .. autoattribute:: poisson_ratio
+    .. autoattribute:: viscosity_mu_name
+    .. autoattribute:: poisson_ratio_name
     """
+
     mapper_method: ClassVar[str] = "map_elasticity_kernel"
 
     icomp: int
@@ -744,61 +830,46 @@ class ElasticityKernel(ExpressionKernel):
     jcomp: int
     """Component index for the kernel."""
 
-    viscosity_mu: float | SpatialConstant
+    viscosity_mu_name: str
     r"""The argument name to use for the dynamic viscosity :math:`\mu` when
-    generating functions to evaluate this kernel. Can also be a numeric value.
+    generating functions to evaluate this kernel.
     """
-    poisson_ratio: float | SpatialConstant
+    poisson_ratio_name: str
     r"""The argument name to use for Poisson's ratio :math:`\nu` when generating
-    functions to evaluate this kernel. Can also be a numeric value.
+    functions to evaluate this kernel.
     """
-
-    def __new__(cls,
-                dim: int, icomp: int, jcomp: int,
-                viscosity_mu: float | str | SpatialConstant = "mu",
-                poisson_ratio: float | str | SpatialConstant = "nu",
-        ) -> ElasticityKernel:
-        if poisson_ratio == 0.5:
-            return super().__new__(StokesletKernel)
-        else:
-            return super().__new__(cls)
 
     def __init__(self,
-                 dim: int, icomp: int, jcomp: int,
-                 viscosity_mu: float | str | SpatialConstant = "mu",
-                 poisson_ratio: float | str | SpatialConstant = "nu") -> None:
-        if isinstance(viscosity_mu, str):
-            mu = SpatialConstant(viscosity_mu)
-        else:
-            mu = viscosity_mu
+                 dim: int,
+                 icomp: int,
+                 jcomp: int,
+                 viscosity_mu_name: str = "mu",
+                 poisson_ratio_name: str = "nu") -> None:
+        if not isinstance(viscosity_mu_name, str):
+            raise TypeError(
+                f"'viscosity_mu_name' is not a str: {type(viscosity_mu_name)}"
+            )
 
-        if isinstance(poisson_ratio, str):
-            nu = SpatialConstant(poisson_ratio)
-        else:
-            nu = poisson_ratio
+        if not isinstance(poisson_ratio_name, str):
+            raise TypeError(
+                f"'poisson_ratio_name' is not a str: {type(poisson_ratio_name)}"
+            )
+
+        mu = SpatialConstant(viscosity_mu_name)
+        nu = SpatialConstant(poisson_ratio_name)
+
+        d = make_sym_vector("d", dim)
+        r = pymbolic_real_norm_2(d)
+        delta_ij = 1 if icomp == jcomp else 0
 
         if dim == 2:
-            d = make_sym_vector("d", dim)
-            r = pymbolic_real_norm_2(d)
             # See (Berger and Karageorghis 2001)
-            expr = (
-                -var("log")(r)*((3 - 4 * nu) if icomp == jcomp else 0)
-                +
-                d[icomp]*d[jcomp]/r**2
-                )
+            expr = -var("log")(r)*(3 - 4 * nu)*delta_ij + d[icomp]*d[jcomp]/r**2
             scaling = -1/(8*var("pi")*(1 - nu)*mu)
-
         elif dim == 3:
-            d = make_sym_vector("d", dim)
-            r = pymbolic_real_norm_2(d)
             # Kelvin solution
-            expr = (
-                (1/r)*((3 - 4*nu) if icomp == jcomp else 0)
-                +
-                d[icomp]*d[jcomp]/r**3
-                )
+            expr = (1/r)*(3 - 4*nu)*delta_ij + d[icomp]*d[jcomp]/r**3
             scaling = -1/(16*var("pi")*(1 - nu)*mu)
-
         else:
             raise NotImplementedError(f"unsupported dimension: '{dim}'")
 
@@ -806,49 +877,35 @@ class ElasticityKernel(ExpressionKernel):
 
         object.__setattr__(self, "icomp", icomp)
         object.__setattr__(self, "jcomp", jcomp)
-        object.__setattr__(self, "viscosity_mu", mu)
-        object.__setattr__(self, "poisson_ratio", nu)
+        object.__setattr__(self, "viscosity_mu_name", viscosity_mu_name)
+        object.__setattr__(self, "poisson_ratio_name", poisson_ratio_name)
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"ElasticityKnl{self.dim}D_{self.icomp}{self.jcomp}"
+            f"({self.viscosity_mu_name}, {self.poisson_ratio_name})")
 
     @override
     def __reduce__(self):
         return (
             type(self),
-            (self.dim, self.icomp, self.jcomp, self.viscosity_mu, self.poisson_ratio))
+            (self.dim, self.icomp, self.jcomp,
+             self.viscosity_mu_name,
+             self.poisson_ratio_name))
 
     @property
     @override
     def is_complex_valued(self) -> bool:
         return False
 
-    @override
-    def __str__(self) -> str:
-        return (
-            f"ElasticityKnl{self.dim}D_{self.icomp}{self.jcomp}"
-            f"({self.viscosity_mu}, {self.poisson_ratio})")
-
     @memoize_method
     @override
     def get_args(self) -> Sequence[KernelArgument]:
-        from sumpy.tools import get_all_variables
-        variables = get_all_variables(self.viscosity_mu)
-
-        args: list[KernelArgument] = []
-        for v in variables:
-            args.append(KernelArgument(loopy_arg=lp.ValueArg(v.name, np.float64)))
-
-        return [*args, *self.get_source_args()]
-
-    @memoize_method
-    @override
-    def get_source_args(self) -> Sequence[KernelArgument]:
-        from sumpy.tools import get_all_variables
-        variables = get_all_variables(self.poisson_ratio)
-
-        args: list[KernelArgument] = []
-        for v in variables:
-            args.append(KernelArgument(loopy_arg=lp.ValueArg(v.name, np.float64)))
-
-        return args
+        return [
+            KernelArgument(loopy_arg=lp.ValueArg(self.viscosity_mu_name, np.float64)),
+            KernelArgument(loopy_arg=lp.ValueArg(self.poisson_ratio_name, np.float64)),
+        ]
 
     @override
     def get_pde_as_diff_op(self) -> LinearPDESystemOperator:
@@ -858,53 +915,120 @@ class ElasticityKernel(ExpressionKernel):
         return laplacian(laplacian(w))
 
 
-@dataclass(frozen=True)
-class StokesletKernel(ElasticityKernel):
-    """
+@dataclass(frozen=True, repr=False)
+class StokesletKernel(ExpressionKernel):
+    r"""A kernel for the Stokes equations (see e.g. Chapter 2 in [Pozrikidis1992]_).
+
+    .. math::
+
+        \begin{cases}
+        -\mu \Delta K_{ij}(\mathbf{x}, \mathbf{y})
+            + \nabla_i P_j(\mathbf{x}, \mathbf{y})
+            = \delta_{ij} \delta(\mathbf{x} - \mathbf{y}), \\
+        \nabla_i K_{ij}(\mathbf{x}, \mathbf{y}) = 0, \\
+        \end{cases}
+
+    where pressure kernel :math:`P_j = \partial_j K` is the derivative of the
+    Laplace kernel. This kernel is often called the Stokeslet or the Oseen-Burgers
+    tensor and it represents the velocity field.
+
     .. autoattribute:: icomp
     .. autoattribute:: jcomp
-    .. autoattribute:: viscosity_mu
+    .. autoattribute:: viscosity_mu_name
     """
 
-    def __new__(cls,
-                dim: int,
-                icomp: int,
-                jcomp: int,
-                viscosity_mu: float | str | SpatialConstant = "mu",
-                poisson_ratio: float | str | SpatialConstant | None = None,
-            ) -> StokesletKernel:
-        return object.__new__(cls)
+    mapper_method: ClassVar[str] = "map_stokeslet_kernel"
+
+    icomp: int
+    """Component index for the kernel."""
+    jcomp: int
+    """Component index for the kernel."""
+
+    viscosity_mu_name: str
+    r"""The argument name to use for the dynamic viscosity :math:`\mu` when
+    generating functions to evaluate this kernel.
+    """
 
     def __init__(self,
-                dim: int,
-                icomp: int,
-                jcomp: int,
-                viscosity_mu: float | str | SpatialConstant = "mu",
-                poisson_ratio: float | str | SpatialConstant | None = None) -> None:
-        if poisson_ratio is None:
-            poisson_ratio = 0.5
+                 dim: int,
+                 icomp: int,
+                 jcomp: int,
+                 viscosity_mu_name: str = "mu") -> None:
+        if not isinstance(viscosity_mu_name, str):
+            raise TypeError(
+                f"'viscosity_mu_name' is not a str: {type(viscosity_mu_name)}"
+            )
+        mu = SpatialConstant(viscosity_mu_name)
 
-        if poisson_ratio != 0.5:
-            raise ValueError(
-                "'StokesletKernel' must have a Poisson ratio of 0.5: "
-                f"got '{poisson_ratio}'")
+        d = make_sym_vector("d", dim)
+        r = pymbolic_real_norm_2(d)
+        delta_ij = 1 if icomp == jcomp else 0
 
-        super().__init__(dim, icomp, jcomp, viscosity_mu, poisson_ratio)
+        if dim == 2:
+            expr = -var("log")(r)*delta_ij + d[icomp]*d[jcomp]/r**2
+            scaling = -1/(4*var("pi")*mu)
+        elif dim == 3:
+            expr = (1/r)*delta_ij + d[icomp]*d[jcomp]/r**3
+            scaling = -1/(8*var("pi")*mu)
+        else:
+            raise NotImplementedError(f"unsupported dimension: '{dim}'")
+
+        super().__init__(dim, expression=expr, global_scaling_const=scaling)
+        object.__setattr__(self, "icomp", icomp)
+        object.__setattr__(self, "jcomp", jcomp)
+        object.__setattr__(self, "viscosity_mu_name", viscosity_mu_name)
 
     @override
     def __str__(self) -> str:
         return (
             f"StokesletKnl{self.dim}D_{self.icomp}{self.jcomp}"
-            f"({self.viscosity_mu}, {self.poisson_ratio})")
+            f"({self.viscosity_mu_name})")
+
+    @override
+    def __reduce__(self):
+        return (
+            type(self),
+            (self.dim, self.icomp, self.jcomp, self.viscosity_mu_name))
+
+    @property
+    @override
+    def is_complex_valued(self) -> bool:
+        return False
+
+    @memoize_method
+    @override
+    def get_args(self) -> Sequence[KernelArgument]:
+        return [
+            KernelArgument(
+                loopy_arg=lp.ValueArg(self.viscosity_mu_name, np.float64),
+            )
+        ]
+
+    @override
+    def get_pde_as_diff_op(self) -> LinearPDESystemOperator:
+        from sumpy.expansion.diff_op import laplacian, make_identity_diff_op
+
+        w = make_identity_diff_op(self.dim)
+        return laplacian(laplacian(w))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class StressletKernel(ExpressionKernel):
-    """
+    r"""A kernel for the Stokes equations (see e.g. Chapter 2 in [Pozrikidis1992]_).
+
+    .. math::
+
+        K_{ijk}(\mathbf{x}, \mathbf{y}) =
+            -P_j \delta_{ik}
+            + \mu (\partial_k K_{ij} + \partial_i K_{kj})
+
+    where the two-index :math:`K_{ij}` is the :class:`~sumpy.kernel.StokesletKernel`.
+    This kernel is often called the Stresslet and it represents the stress tensor.
+
     .. autoattribute:: icomp
     .. autoattribute:: jcomp
     .. autoattribute:: kcomp
-    .. autoattribute:: viscosity_mu
+    .. autoattribute:: viscosity_mu_name
     """
     mapper_method: ClassVar[str] = "map_stresslet_kernel"
 
@@ -914,36 +1038,33 @@ class StressletKernel(ExpressionKernel):
     """Component index for the kernel."""
     kcomp: int
     """Component index for the kernel."""
-    viscosity_mu: float | SpatialConstant
+
+    viscosity_mu_name: str
     r"""The argument name to use for the dynamic viscosity :math:`\mu` when
-    generating functions to evaluate this kernel. Can also be a numeric value.
+    generating functions to evaluate this kernel.
     """
 
     def __init__(self,
-                 dim: int, icomp: int, jcomp: int, kcomp: int,
-                 viscosity_mu: float | str | SpatialConstant = "mu") -> None:
+                 dim: int,
+                 icomp: int,
+                 jcomp: int,
+                 kcomp: int,
+                 viscosity_mu_name: str = "mu") -> None:
         # mu is unused but kept for consistency with the Stokeslet.
-        if isinstance(viscosity_mu, str):
-            mu = SpatialConstant(viscosity_mu)
-        else:
-            mu = viscosity_mu
+        if not isinstance(viscosity_mu_name, str):
+            raise TypeError(
+                f"'viscosity_mu_name' is not a str: {type(viscosity_mu_name)}"
+            )
+
+        d = make_sym_vector("d", dim)
+        r = pymbolic_real_norm_2(d)
 
         if dim == 2:
-            d = make_sym_vector("d", dim)
-            r = pymbolic_real_norm_2(d)
-            expr = (
-                d[icomp]*d[jcomp]*d[kcomp]/r**4
-                )
+            expr = d[icomp]*d[jcomp]*d[kcomp]/r**4
             scaling = 1/(var("pi"))
-
         elif dim == 3:
-            d = make_sym_vector("d", dim)
-            r = pymbolic_real_norm_2(d)
-            expr = (
-                d[icomp]*d[jcomp]*d[kcomp]/r**5
-                )
+            expr = d[icomp]*d[jcomp]*d[kcomp]/r**5
             scaling = 3/(4*var("pi"))
-
         else:
             raise NotImplementedError(f"unsupported dimension: '{dim}'")
 
@@ -952,41 +1073,48 @@ class StressletKernel(ExpressionKernel):
         object.__setattr__(self, "icomp", icomp)
         object.__setattr__(self, "jcomp", jcomp)
         object.__setattr__(self, "kcomp", kcomp)
-        object.__setattr__(self, "viscosity_mu", mu)
+        object.__setattr__(self, "viscosity_mu_name", viscosity_mu_name)
+
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (
+            self.__class__,
+            (self.dim, self.icomp, self.jcomp, self.kcomp,
+             self.viscosity_mu_name))
 
     @property
     @override
     def is_complex_valued(self) -> bool:
         return False
 
+    @memoize_method
+    @override
+    def get_args(self) -> Sequence[KernelArgument]:
+        # NOTE: this is not used, but kept for symmetry with the StokesletKernel
+        return [
+            KernelArgument(loopy_arg=lp.ValueArg(self.viscosity_mu_name, np.float64))
+        ]
+
     @override
     def __str__(self) -> str:
         return (
             f"StressletKnl{self.dim}D_{self.icomp}{self.jcomp}{self.kcomp}"
-            f"({self.viscosity_mu})")
-
-    @memoize_method
-    @override
-    def get_args(self) -> Sequence[KernelArgument]:
-        from sumpy.tools import get_all_variables
-        variables = get_all_variables(self.viscosity_mu)
-        return [
-                KernelArgument(loopy_arg=lp.ValueArg(v.name, np.float64))
-                for v in variables]
+            f"({self.viscosity_mu_name})")
 
     @override
     def get_pde_as_diff_op(self) -> LinearPDESystemOperator:
         from sumpy.expansion.diff_op import laplacian, make_identity_diff_op
+
         w = make_identity_diff_op(self.dim)
         return laplacian(laplacian(w))
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class LineOfCompressionKernel(ExpressionKernel):
     """A kernel for the line of compression or dilatation of constant strength
-    along the axis "axis" from zero to negative infinity.
+    along an axis from zero to negative infinity.
 
-    This is used for the explicit solution to half-space Elasticity problem.
+    This is used for the explicit solution to half-space linear elasticity problem.
     See [Mindlin1936]_ for details.
 
     .. [Mindlin1936] R. D. Mindlin (1936).
@@ -995,41 +1123,47 @@ class LineOfCompressionKernel(ExpressionKernel):
          `doi:10.1063/1.1745385 <https://doi.org/10.1063/1.1745385>`__.
 
     .. autoattribute:: axis
-    .. autoattribute:: viscosity_mu
-    .. autoattribute:: poisson_ratio
+    .. autoattribute:: viscosity_mu_name
+    .. autoattribute:: poisson_ratio_name
     """
 
     mapper_method: ClassVar[str] = "map_line_of_compression_kernel"
 
     axis: int
     """Axis number (defaulting to 2 for the z axis)."""
-    viscosity_mu: float | SpatialConstant
+
+    viscosity_mu_name: str
     r"""The argument name to use for the dynamic viscosity :math:`\mu` when
-    generating functions to evaluate this kernel. Can also be a numeric value.
+    generating functions to evaluate this kernel.
     """
-    poisson_ratio: float | SpatialConstant
+    poisson_ratio_name: str
     r"""The argument name to use for Poisson's ratio :math:`\nu` when
-    generating functions to evaluate this kernel. Can also be a numeric value.
+    generating functions to evaluate this kernel.
     """
 
     def __init__(self,
                  dim: int = 3,
                  axis: int = 2,
-                 viscosity_mu: float | str | SpatialConstant = "mu",
-                 poisson_ratio: float | str | SpatialConstant = "nu"
+                 viscosity_mu_name: str = "mu",
+                 poisson_ratio_name: str = "nu"
              ) -> None:
-        if isinstance(viscosity_mu, str):
-            mu = SpatialConstant(viscosity_mu)
-        else:
-            mu = viscosity_mu
-        if isinstance(poisson_ratio, str):
-            nu = SpatialConstant(poisson_ratio)
-        else:
-            nu = poisson_ratio
+        if not isinstance(viscosity_mu_name, str):
+            raise TypeError(
+                f"'viscosity_mu_name' is not a str: {type(viscosity_mu_name)}"
+            )
+
+        if not isinstance(poisson_ratio_name, str):
+            raise TypeError(
+                f"'poisson_ratio_name' is not a str: {type(poisson_ratio_name)}"
+            )
+
+        mu = SpatialConstant(viscosity_mu_name)
+        nu = SpatialConstant(poisson_ratio_name)
 
         if dim == 3:
             d = make_sym_vector("d", dim)
             r = pymbolic_real_norm_2(d)
+
             # Kelvin solution
             expr = d[axis] * var("log")(r + d[axis]) - r
             scaling = (1 - 2*nu)/(4*var("pi")*mu)
@@ -1039,38 +1173,301 @@ class LineOfCompressionKernel(ExpressionKernel):
         super().__init__(dim, expression=expr, global_scaling_const=scaling)
 
         object.__setattr__(self, "axis", axis)
-        object.__setattr__(self, "viscosity_mu", mu)
-        object.__setattr__(self, "poisson_ratio", nu)
+        object.__setattr__(self, "viscosity_mu_name", viscosity_mu_name)
+        object.__setattr__(self, "poisson_ratio_name", poisson_ratio_name)
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"LineOfCompressionKnl{self.dim}D_{self.axis}"
+            f"({self.viscosity_mu_name}, {self.poisson_ratio_name})")
+
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (
+            self.__class__,
+            (self.dim, self.axis,
+             self.viscosity_mu_name, self.poisson_ratio_name))
 
     @property
     @override
     def is_complex_valued(self) -> bool:
         return False
 
-    @override
-    def __str__(self) -> str:
-        return f"LineOfCompressionKnl{self.dim}D_{self.axis}"
-
     @memoize_method
     @override
     def get_args(self) -> Sequence[KernelArgument]:
-        from sumpy.tools import get_all_variables
-        variables = [
-            *get_all_variables(self.viscosity_mu),
-            *get_all_variables(self.poisson_ratio)]
-
-        args: list[KernelArgument] = []
-        for v in variables:
-            args.append(KernelArgument(loopy_arg=lp.ValueArg(v.name, np.float64)))
-
-        return args
+        return [
+            KernelArgument(loopy_arg=lp.ValueArg(self.viscosity_mu_name, np.float64)),
+            KernelArgument(loopy_arg=lp.ValueArg(self.poisson_ratio_name, np.float64)),
+        ]
 
     @override
     def get_pde_as_diff_op(self) -> LinearPDESystemOperator:
         from sumpy.expansion.diff_op import laplacian, make_identity_diff_op
+
         w = make_identity_diff_op(self.dim)
         return laplacian(w)
 
+
+@dataclass(frozen=True, repr=False)
+class BrinkmanletKernel(ExpressionKernel):
+    r"""A kernel for the Brinkman equations.
+
+    .. math::
+
+        \begin{cases}
+        -\mu (\Delta K_{ij}(\mathbf{x}, \mathbf{y})
+              - k^2 K_{ij}(\mathbf{x}, \mathbf{y}))
+        + \nabla_i P_j(\mathbf{x}, \mathbf{y})
+        = \delta_{ij}(\mathbf{x} - \mathbf{y}), \\
+        \nabla_i K_{ij} = 0,
+        \end{cases}
+
+    where :math:`P_j` is the pressure kernel.
+    """
+
+    mapper_method: ClassVar[str] = "map_brinkmanlet_kernel"
+
+    icomp: int
+    """Component index for the kernel."""
+    jcomp: int
+    """Component index for the kernel."""
+
+    viscosity_mu_name: str
+    """The argument name to use for the dynamic viscosity when generating
+    functions to evaluate this kernel.
+    """
+    darcy_impermeability_name: str
+    """The argument name to use for the Darcy impermeability when generating
+    functions to evaluate this kernel.
+    """
+
+    def __init__(self,
+                 dim: int,
+                 icomp: int,
+                 jcomp: int,
+                 viscosity_mu_name: str = "mu",
+                 darcy_impermeability_name: str = "k") -> None:
+        mu = SpatialConstant(viscosity_mu_name)
+        k = SpatialConstant(darcy_impermeability_name)
+
+        d = make_sym_vector("d", dim)
+        r = pymbolic_real_norm_2(d)
+        R = k * r  # noqa: N806
+        delta_ij = 1 if icomp == jcomp else 0
+
+        # NOTE:
+        #   [1] C. Pozrikidis, A Practical Guide to Boundary Element Methods,
+        #   CRC Press, 2002.
+        #   [2] https://dlmf.nist.gov/10.27#E8
+        #   [3] https://doi.org/10.1080/00036811.2011.614604
+        #   [4] https://doi.org/10.1002/mana.200710797
+
+        if dim == 2:
+            # transforming Bessel functions to Hankel functions using [2]
+            K0 = var("pi") * var("I") / 2 * var("hankel_1")(0, var("I") * R)  # noqa: N806
+            K1 = -var("pi") / 2 * var("hankel_1")(1, var("I") * R)            # noqa: N806
+
+            # [1] Equations 7.7.5 and 7.7.6
+            # [3] Equations 5.2 and 5.3 (for the scaling we use here)
+            a = 2 * (K0 + K1 / R - 1 / R**2)
+            b = 2 * (2 / R**2 - 2 * K1 / R - K0)
+            expr = a * delta_ij + b * d[icomp] * d[jcomp] / r ** 2
+            scaling = -1 / (4 * var("pi") * mu)
+        elif dim == 3:
+            # [4] Equations 4.2 and 4.3
+            a = 2 * var("exp")(-R) * (1 + 1 / R + 1 / R**2) - 2 / R**2
+            b = 6 / R**2 - 2 * var("exp")(-R) * (1 + 3 / R + 3 / R**2)
+            expr = a * delta_ij / r + b * d[icomp] * d[jcomp] / r ** 3
+            scaling = -1 / (8 * var("pi") * mu)
+        else:
+            raise NotImplementedError(f"unsupported dimension: '{dim}'")
+
+        super().__init__(dim, expression=expr, global_scaling_const=scaling)
+
+        object.__setattr__(self, "icomp", icomp)
+        object.__setattr__(self, "jcomp", jcomp)
+        object.__setattr__(self, "viscosity_mu_name", viscosity_mu_name)
+        object.__setattr__(self, "darcy_impermeability_name", darcy_impermeability_name)
+
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (
+            self.__class__,
+            (self.dim, self.icomp, self.jcomp,
+             self.viscosity_mu_name, self.darcy_impermeability_name),
+        )
+
+    @property
+    @override
+    def is_complex_valued(self) -> bool:
+        # FIXME: 2D uses Hankel functions (complex-valued); 3D uses real exp
+        return self.dim == 2
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"BrinkmanletKnl{self.dim}D_{self.icomp}{self.jcomp}"
+            f"({self.viscosity_mu_name}, {self.darcy_impermeability_name})")
+
+    @override
+    def prepare_loopy_kernel(self, loopy_knl: lp.TranslationUnit) -> lp.TranslationUnit:
+        from sumpy.codegen import register_bessel_callables
+        return register_bessel_callables(loopy_knl)
+
+    @memoize_method
+    @override
+    def get_args(self) -> Sequence[KernelArgument]:
+        return [
+            KernelArgument(loopy_arg=lp.ValueArg(self.viscosity_mu_name, np.float64)),
+            KernelArgument(loopy_arg=lp.ValueArg(self.darcy_impermeability_name, np.float64)),  # noqa: E501
+        ]
+
+    @override
+    def get_pde_as_diff_op(self) -> LinearPDESystemOperator:
+        from sumpy.expansion.diff_op import laplacian, make_identity_diff_op
+
+        w = make_identity_diff_op(self.dim)
+        k = sym.Symbol(self.darcy_impermeability_name)
+        return laplacian(laplacian(w) - k**2 * w)
+
+
+@dataclass(frozen=True, repr=False)
+class BrinkmanStressKernel(ExpressionKernel):
+    r"""A kernel for the Brinkman equations.
+
+    .. math::
+
+        K_{ijk} =
+            -p_j \delta_{ik}
+            + \mu (\partial_k K_{ij} + \partial_i K_{jk}),
+
+    where the two-index :math:`K_{ij}` is the :class:`~sumpy.kernel.BrinkmanletKernel`
+    and :math:`P_j` is the pressure kernel.
+    """
+
+    mapper_method: ClassVar[str] = "map_brinkman_stress_kernel"
+
+    icomp: int
+    """Component index for the kernel."""
+    jcomp: int
+    """Component index for the kernel."""
+    kcomp: int
+    """Component index for the kernel."""
+
+    # NOTE: we keep the viscosity_mu_name for symmetry with the BrinkmanKernel,
+    # even though it isn't actually used in the stress kernel
+    viscosity_mu_name: str
+    """The argument name to use for the dynamic viscosity when generating
+    functions to evaluate this kernel.
+    """
+    darcy_impermeability_name: str
+    """The argument name to use for the Darcy impermeability when generating
+    functions to evaluate this kernel.
+    """
+
+    def __init__(self,
+                 dim: int,
+                 icomp: int,
+                 jcomp: int,
+                 kcomp: int,
+                 viscosity_mu_name: str = "mu",
+                 darcy_impermeability_name: str = "k") -> None:
+        k = SpatialConstant(darcy_impermeability_name)
+
+        d = make_sym_vector("d", dim)
+        r = pymbolic_real_norm_2(d)
+        R = k * r  # noqa: N806
+        delta_ij = 1 if icomp == jcomp else 0
+        delta_ik = 1 if icomp == kcomp else 0
+        delta_kj = 1 if jcomp == kcomp else 0
+
+        # NOTE:
+        #   [1] C. Pozrikidis, A Practical Guide to Boundary Element Methods,
+        #   CRC Press, 2002.
+        #   [2] https://dlmf.nist.gov/10.27#E8
+        #   [3] https://doi.org/10.1080/00036811.2011.614604
+        #   [4] https://doi.org/10.1002/mana.200710797
+
+        if dim == 2:
+            # transforming Bessel functions to Hankel functions using [2]
+            K0 = var("pi") * var("I") / 2 * var("hankel_1")(0, var("I") * R)  # noqa: N806
+            K1 = -var("pi") / 2 * var("hankel_1")(1, var("I") * R)            # noqa: N806
+
+            # [1] Equations 7.7.7 and 7.7.8
+            # [3] Equations 5.4-5.6 (for the scaling we use here)
+            a = 2 * (2 / R**2 - 2 * K1 / R - K0)
+            b = 8 / R**2 - 4*K0 - 2*(R + 4 / R)*K1
+            c = b + R * K1
+            expr = (
+                2 * (a - 1) * d[jcomp] / r**2 * delta_ik
+                + b * (d[kcomp] * delta_ij + d[icomp] * delta_kj) / r**2
+                - 4 * c * d[icomp] * d[jcomp] * d[kcomp] / r**4
+            )
+            scaling = -1 / (4 * var("pi"))
+        elif dim == 3:
+            # [4] Equations 4.4-4.6
+            d1 = 2 * var("exp")(-R) * (1 + 3 / R + 3 / R**2) - 6 / R**2 + 1
+            d2 = var("exp")(-R) * (R + 3 + 6 / R + 6 / R**2) - 6 / R**2
+            d3 = var("exp")(-R) * (-2 * R - 12 - 30 / R - 30 / R**2) + 30 / R**2
+            expr = (
+                d1 * d[jcomp] / r**3 * delta_ik
+                + d2 * (d[kcomp] * delta_ij + d[icomp] * delta_kj) / r**3
+                + d3 * d[icomp] * d[jcomp] * d[kcomp] / r**5
+            )
+            scaling = 1/(4*var("pi"))
+        else:
+            raise NotImplementedError(f"unsupported dimension: '{dim}'")
+
+        super().__init__(dim, expression=expr, global_scaling_const=scaling)
+
+        object.__setattr__(self, "icomp", icomp)
+        object.__setattr__(self, "jcomp", jcomp)
+        object.__setattr__(self, "kcomp", kcomp)
+        object.__setattr__(self, "viscosity_mu_name", viscosity_mu_name)
+        object.__setattr__(self, "darcy_impermeability_name", darcy_impermeability_name)
+
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        return (
+            self.__class__,
+            (self.dim, self.icomp, self.jcomp, self.kcomp,
+             self.viscosity_mu_name, self.darcy_impermeability_name),
+        )
+
+    @property
+    @override
+    def is_complex_valued(self) -> bool:
+        # 2D uses Hankel functions (complex-valued); 3D uses real exp
+        return self.dim == 2
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"BrinkmanStressKnl{self.dim}D_{self.icomp}{self.jcomp}{self.kcomp}"
+            f"({self.viscosity_mu_name}, {self.darcy_impermeability_name})")
+
+    @override
+    def prepare_loopy_kernel(self, loopy_knl: lp.TranslationUnit) -> lp.TranslationUnit:
+        from sumpy.codegen import register_bessel_callables
+        return register_bessel_callables(loopy_knl)
+
+    @memoize_method
+    @override
+    def get_args(self) -> Sequence[KernelArgument]:
+        return [
+            KernelArgument(loopy_arg=lp.ValueArg(self.viscosity_mu_name, np.float64)),
+            KernelArgument(loopy_arg=lp.ValueArg(self.darcy_impermeability_name, np.float64)),  # noqa: E501
+        ]
+
+    @override
+    def get_pde_as_diff_op(self) -> LinearPDESystemOperator:
+        from sumpy.expansion.diff_op import laplacian, make_identity_diff_op
+
+        w = make_identity_diff_op(self.dim)
+        k = sym.Symbol(self.darcy_impermeability_name)
+        return laplacian(laplacian(w) - k**2 * w)
 
 # }}}
 
@@ -1100,7 +1497,7 @@ class KernelWrapper(Kernel, ABC):
         return self.inner_kernel.prepare_loopy_kernel(loopy_knl)
 
     @override
-    def get_expression(self, dist_vec: sp.Matrix) -> ArithmeticExpr:
+    def get_expression(self, dist_vec: sym.Matrix) -> sym.Expr:
         return self.inner_kernel.get_expression(dist_vec)
 
     @override
@@ -1126,7 +1523,7 @@ class KernelWrapper(Kernel, ABC):
         return self.inner_kernel.postprocess_at_target(expr, bvec)
 
     @override
-    def get_global_scaling_const(self) -> ArithmeticExpr:
+    def get_global_scaling_const(self) -> sym.Expr:
         return self.inner_kernel.get_global_scaling_const()
 
     @override
@@ -1147,11 +1544,10 @@ class KernelWrapper(Kernel, ABC):
             f"'replace_base_kernel' is not implemented for '{type(self).__name__}'")
 
     @override
-    def get_derivative_taker(
-            self,
-            dvec: sp.Matrix,
-            rscale: ArithmeticExpr,
-            sac: SymbolicAssignmentCollection,
+    def get_derivative_taker(self,
+            dvec: sym.Matrix,
+            rscale: sym.Expr,
+            sac: SymbolicAssignmentCollection | None,
         ) -> ExprDerivativeTaker:
         return self.inner_kernel.get_derivative_taker(dvec, rscale, sac)
 
@@ -1401,6 +1797,7 @@ class DirectionalSourceDerivative(DirectionalDerivative):
         return lp.tag_array_axes(loopy_knl, self.dir_vec_name, "sep,C")
 
 
+@dataclass(frozen=True)
 class TargetPointMultiplier(KernelWrapper):
     """Bases: :class:`Kernel`
 
@@ -1417,8 +1814,8 @@ class TargetPointMultiplier(KernelWrapper):
     """Coordinate axis with which to multiply the kernel."""
 
     def __init__(self, axis: int, inner_kernel: Kernel) -> None:
-        KernelWrapper.__init__(self, inner_kernel)
-        self.axis = axis
+        super().__init__(inner_kernel)
+        object.__setattr__(self, "axis", axis)
 
     @override
     def __str__(self) -> str:
@@ -1536,13 +1933,26 @@ class KernelIdentityMapper(KernelMapper[Kernel]):
     def map_expression_kernel(self, kernel: ExpressionKernel) -> Kernel:
         return kernel
 
-    map_laplace_kernel = map_expression_kernel
-    map_biharmonic_kernel = map_expression_kernel
-    map_helmholtz_kernel = map_expression_kernel
-    map_yukawa_kernel = map_expression_kernel
-    map_elasticity_kernel = map_expression_kernel
-    map_line_of_compression_kernel = map_expression_kernel
-    map_stresslet_kernel = map_expression_kernel
+    map_laplace_kernel: \
+        Callable[[Self, LaplaceKernel], Kernel] = map_expression_kernel
+    map_biharmonic_kernel: \
+        Callable[[Self, BiharmonicKernel], Kernel] = map_expression_kernel
+    map_helmholtz_kernel: \
+        Callable[[Self, HelmholtzKernel], Kernel] = map_expression_kernel
+    map_yukawa_kernel: \
+        Callable[[Self, YukawaKernel], Kernel] = map_expression_kernel
+    map_elasticity_kernel: \
+        Callable[[Self, ElasticityKernel], Kernel] = map_expression_kernel
+    map_line_of_compression_kernel: \
+        Callable[[Self, LineOfCompressionKernel], Kernel] = map_expression_kernel
+    map_stokeslet_kernel: \
+        Callable[[Self, StokesletKernel], Kernel] = map_expression_kernel
+    map_stresslet_kernel: \
+        Callable[[Self, StressletKernel], Kernel] = map_expression_kernel
+    map_brinkmanlet_kernel: \
+        Callable[[Self, BrinkmanletKernel], Kernel] = map_expression_kernel
+    map_brinkman_stress_kernel: \
+        Callable[[Self, BrinkmanStressKernel], Kernel] = map_expression_kernel
 
     def map_axis_target_derivative(self, kernel: AxisTargetDerivative) -> Kernel:
         return type(kernel)(kernel.axis, self.rec(kernel.inner_kernel))
@@ -1609,12 +2019,26 @@ class DerivativeCounter(KernelCombineMapper[int]):
     def map_expression_kernel(self, kernel: ExpressionKernel) -> int:
         return 0
 
-    map_laplace_kernel = map_expression_kernel
-    map_biharmonic_kernel = map_expression_kernel
-    map_helmholtz_kernel = map_expression_kernel
-    map_yukawa_kernel = map_expression_kernel
-    map_line_of_compression_kernel = map_expression_kernel
-    map_stresslet_kernel = map_expression_kernel
+    map_laplace_kernel: \
+        Callable[[Self, LaplaceKernel], int] = map_expression_kernel
+    map_biharmonic_kernel: \
+        Callable[[Self, BiharmonicKernel], int] = map_expression_kernel
+    map_helmholtz_kernel: \
+        Callable[[Self, HelmholtzKernel], int] = map_expression_kernel
+    map_yukawa_kernel: \
+        Callable[[Self, YukawaKernel], int] = map_expression_kernel
+    map_elasticity_kernel: \
+        Callable[[Self, ElasticityKernel], int] = map_expression_kernel
+    map_line_of_compression_kernel: \
+        Callable[[Self, LineOfCompressionKernel], int] = map_expression_kernel
+    map_stokeslet_kernel: \
+        Callable[[Self, StokesletKernel], int] = map_expression_kernel
+    map_stresslet_kernel: \
+        Callable[[Self, StressletKernel], int] = map_expression_kernel
+    map_brinkmanlet_kernel: \
+        Callable[[Self, BrinkmanletKernel], int] = map_expression_kernel
+    map_brinkman_stress_kernel: \
+        Callable[[Self, BrinkmanStressKernel], int] = map_expression_kernel
 
     @override
     def map_axis_target_derivative(self, kernel: AxisTargetDerivative) -> int:

@@ -24,14 +24,20 @@ THE SOFTWARE.
 """
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 import loopy as lp
-from loopy.version import MOST_RECENT_LANGUAGE_VERSION
+from loopy.version import MOST_RECENT_LANGUAGE_VERSION  # noqa: F401
+from pytools import obj_array
 
-from sumpy.codegen import register_optimization_preambles
+from sumpy.array_context import make_loopy_program
 from sumpy.tools import KernelCacheMixin, gather_loopy_arguments
+
+
+if TYPE_CHECKING:
+    from arraycontext import ArrayContext
 
 
 __doc__ = """
@@ -46,11 +52,10 @@ Expansion-to-particle
 """
 
 
-# {{{ E2P base class
+# {{{ E2PBase: base class
 
 class E2PBase(KernelCacheMixin, ABC):
-    def __init__(self, ctx, expansion, kernels,
-            name=None, device=None):
+    def __init__(self, expansion, kernels, name=None):
         """
         :arg expansion: a subclass of :class:`sympy.expansion.ExpansionBase`
         :arg strength_usage: A list of integers indicating which expression
@@ -59,31 +64,28 @@ class E2PBase(KernelCacheMixin, ABC):
           Default: all kernels use the same strength.
         """
 
-        if device is None:
-            device = ctx.devices[0]
-
         from sumpy.kernel import (
             SourceTransformationRemover,
             TargetTransformationRemover,
         )
         sxr = SourceTransformationRemover()
         txr = TargetTransformationRemover()
-        expansion = expansion.with_kernel(
-                sxr(expansion.kernel))
+        expansion = expansion.with_kernel(sxr(expansion.kernel))
 
         kernels = [sxr(knl) for knl in kernels]
         for knl in kernels:
             assert txr(knl) == expansion.kernel
 
-        self.context = ctx
         self.expansion = expansion
         self.kernels = kernels
         self.name = name or self.default_name
-        self.device = device
 
         self.dim = expansion.dim
 
     @property
+    def nresults(self):
+        return len(self.kernels)
+
     @abstractmethod
     def default_name(self):
         pass
@@ -99,8 +101,7 @@ class E2PBase(KernelCacheMixin, ABC):
         loopy_knl = lp.remove_unused_inames(loopy_knl)
         for kernel in self.kernels:
             loopy_knl = kernel.prepare_loopy_kernel(loopy_knl)
-        loopy_knl = lp.tag_array_axes(loopy_knl, "targets", "sep,C")
-        return loopy_knl
+        return lp.tag_array_axes(loopy_knl, "targets", "sep,C")
 
     def get_loopy_args(self):
         return gather_loopy_arguments((self.expansion, *tuple(self.kernels)))
@@ -117,7 +118,7 @@ class E2PBase(KernelCacheMixin, ABC):
 # }}}
 
 
-# {{{ E2P to single box (L2P, likely)
+# {{{ E2PFromSingleBox: E2P to single box (L2P, likely)
 
 class E2PFromSingleBox(E2PBase):
     @property
@@ -128,7 +129,7 @@ class E2PFromSingleBox(E2PBase):
         ncoeffs = len(self.expansion)
         loopy_args = self.get_loopy_args()
 
-        loopy_knl = lp.make_kernel(
+        loopy_knl = make_loopy_program(
                 [
                     "{[itgt_box]: 0<=itgt_box<ntgt_boxes}",
                     "{[itgt,idim]: itgt_start<=itgt<itgt_end and 0<=idim<dim}",
@@ -182,34 +183,27 @@ class E2PFromSingleBox(E2PBase):
                     lp.ValueArg("src_base_ibox", np.int32),
                     lp.ValueArg("ntargets", np.int32),
                     *loopy_args,
-                    "..."
+                    ...
                 ],
                 name=self.name,
                 assumptions="ntgt_boxes>=1",
                 silenced_warnings="write_race(*_result)",
-                default_offset=lp.auto,
                 fixed_parameters={"dim": self.dim, "nresults": len(self.kernels),
-                        "ncoeffs": ncoeffs},
-                lang_version=MOST_RECENT_LANGUAGE_VERSION)
+                        "ncoeffs": ncoeffs})
 
         loopy_knl = lp.tag_inames(loopy_knl, "idim*:unr")
         loopy_knl = lp.tag_inames(loopy_knl, "iknl*:unr")
-        loopy_knl = self.add_loopy_eval_callable(loopy_knl)
-
-        return loopy_knl
+        return self.add_loopy_eval_callable(loopy_knl)
 
     def get_optimized_kernel(self):
         # FIXME
         knl = self.get_kernel()
         knl = lp.tag_inames(knl, {"itgt_box": "g.0"})
         knl = lp.add_inames_to_insn(knl, "itgt_box", "id:kernel_scaling")
-        knl = lp.set_options(knl,
+        return lp.set_options(knl,
                 enforce_variable_access_ordered="no_check")
-        knl = register_optimization_preambles(knl, self.device)
 
-        return knl
-
-    def __call__(self, queue, **kwargs):
+    def __call__(self, actx: ArrayContext, **kwargs):
         """
         :arg expansions:
         :arg target_boxes:
@@ -218,19 +212,23 @@ class E2PFromSingleBox(E2PBase):
         :arg centers:
         :arg targets:
         """
-        knl = self.get_cached_kernel_executor()
 
         centers = kwargs.pop("centers")
         # "1" may be passed for rscale, which won't have its type
         # meaningfully inferred. Make the type of rscale explicit.
         rscale = centers.dtype.type(kwargs.pop("rscale"))
 
-        return knl(queue, centers=centers, rscale=rscale, **kwargs)
+        knl = self.get_cached_kernel()
+        result = actx.call_loopy(
+            knl,
+            centers=centers, rscale=rscale, **kwargs)
+
+        return obj_array.new_1d([result[f"result_s{i}"] for i in range(self.nresults)])
 
 # }}}
 
 
-# {{{ E2P from CSR-like interaction list
+# {{{ E2PFromCSR: E2P from CSR-like interaction list
 
 class E2PFromCSR(E2PBase):
     @property
@@ -241,7 +239,7 @@ class E2PFromCSR(E2PBase):
         ncoeffs = len(self.expansion)
         loopy_args = self.get_loopy_args()
 
-        loopy_knl = lp.make_kernel(
+        loopy_knl = make_loopy_program(
                 [
                     "{[itgt_box]: 0<=itgt_box<ntgt_boxes}",
                     "{[itgt]: itgt_start<=itgt<itgt_end}",
@@ -310,41 +308,39 @@ class E2PFromCSR(E2PBase):
                 name=self.name,
                 assumptions="ntgt_boxes>=1",
                 silenced_warnings="write_race(*_result)",
-                default_offset=lp.auto,
                 fixed_parameters={
                         "ncoeffs": ncoeffs,
                         "dim": self.dim,
-                        "nresults": len(self.kernels)},
-                lang_version=MOST_RECENT_LANGUAGE_VERSION)
+                        "nresults": len(self.kernels)})
 
         loopy_knl = lp.tag_inames(loopy_knl, "idim*:unr")
         loopy_knl = lp.tag_inames(loopy_knl, "iknl*:unr")
         loopy_knl = lp.prioritize_loops(loopy_knl, "itgt_box,itgt,isrc_box")
         loopy_knl = self.add_loopy_eval_callable(loopy_knl)
-        loopy_knl = lp.tag_array_axes(loopy_knl, "targets", "sep,C")
-
-        return loopy_knl
+        return lp.tag_array_axes(loopy_knl, "targets", "sep,C")
 
     def get_optimized_kernel(self):
         # FIXME
         knl = self.get_kernel()
         knl = lp.tag_inames(knl, {"itgt_box": "g.0"})
         knl = lp.add_inames_to_insn(knl, "itgt_box", "id:kernel_scaling")
-        knl = lp.set_options(knl,
+        return lp.set_options(knl,
                 enforce_variable_access_ordered="no_check")
-        knl = register_optimization_preambles(knl, self.device)
 
-        return knl
-
-    def __call__(self, queue, **kwargs):
-        knl = self.get_cached_kernel_executor()
-
+    def __call__(self, actx: ArrayContext, **kwargs):
         centers = kwargs.pop("centers")
         # "1" may be passed for rscale, which won't have its type
         # meaningfully inferred. Make the type of rscale explicit.
         rscale = centers.dtype.type(kwargs.pop("rscale"))
 
-        return knl(queue, centers=centers, rscale=rscale, **kwargs)
+        knl = self.get_cached_kernel()
+        result = actx.call_loopy(
+            knl,
+            centers=centers,
+            rscale=rscale,
+            **kwargs)
+
+        return obj_array.new_1d([result[f"result_s{i}"] for i in range(self.nresults)])
 
 # }}}
 

@@ -29,10 +29,21 @@ __doc__ = """
 .. autoclass:: FieldPlotter
 """
 
+from typing import TYPE_CHECKING, Any, cast
+
 import numpy as np
 
 
-def separate_by_real_and_imag(data, real_only):
+if TYPE_CHECKING:
+    import pathlib
+    from collections.abc import Iterable, Iterator, Sequence
+
+    import optype.numpy as onp
+
+
+def separate_by_real_and_imag(
+        data: Iterable[tuple[str, onp.ArrayND[Any]]], *,
+        real_only: bool) -> Iterator[tuple[str, onp.ArrayND[Any]]]:
     from pytools.obj_array import obj_array_imag_copy, obj_array_real_copy
 
     for name, field in data:
@@ -51,7 +62,10 @@ def separate_by_real_and_imag(data, real_only):
             yield (f"{name}_i", obj_array_imag_copy(field))
 
 
-def make_field_plotter_from_bbox(bbox, h, extend_factor=0):
+def make_field_plotter_from_bbox(
+        bbox: tuple[onp.Array1D[np.floating[Any]], onp.Array1D[np.floating[Any]]],
+        h: float | Sequence[float],
+        extend_factor: float = 0) -> FieldPlotter:
     """
     :arg bbox: a tuple (low, high) of points represented as 1D numpy arrays
         indicating the low and high ends of the extent of a bounding box.
@@ -63,74 +77,95 @@ def make_field_plotter_from_bbox(bbox, h, extend_factor=0):
     """
     low, high = bbox
 
-    extent = (high-low) * (1 + extend_factor)
-    center = 0.5*(high+low)
-
+    extent: onp.Array1D[np.floating[Any]] = (high-low) * (1 + extend_factor)
+    center: onp.Array1D[np.floating[Any]] = 0.5*(high+low)
     dimensions = len(center)
+
     from numbers import Number
-    if isinstance(h, Number):
-        h = (h,)*dimensions
+    if isinstance(h, (int, float, Number)):
+        h = cast("Sequence[float]", (h,)*dimensions)
     else:
         if len(h) != dimensions:
             raise ValueError("length of 'h' must match number of dimensions")
 
     from math import ceil
 
-    npoints = tuple(ceil(extent[i] / h[i]) for i in range(dimensions))
-
+    npoints = tuple(ceil(float(extent[i]) / h[i]) for i in range(dimensions))
     return FieldPlotter(center, extent, npoints)
 
 
 class FieldPlotter:
     """
+    .. autoattribute:: dimensions
+    .. autoattribute:: npoints
+    .. autoattribute:: points
+
     .. automethod:: set_matplotlib_limits
     .. automethod:: show_scalar_in_matplotlib
     .. automethod:: show_scalar_in_mayavi
     .. automethod:: write_vtk_file
     """
-    def __init__(self, center, extent=1, npoints=1000):
+
+    dimensions: int
+    npoints: int
+    points: onp.Array2D[np.floating[Any]]
+
+    a: onp.Array1D[np.floating[Any]]
+    b: onp.Array1D[np.floating[Any]]
+    nd_points: onp.ArrayND[np.floating[Any]]
+
+    def __init__(self,
+                 center: onp.ToArray1D[np.floating[Any]],
+                 extent: float | onp.Array1D[np.floating[Any]] = 1,
+                 npoints: int | tuple[int, ...] = 1000,
+                 points: onp.ArrayND[np.floating[Any]] | None = None) -> None:
         center = np.asarray(center)
-        self.dimensions, = dim, = center.shape
-        self.a = a = center-extent*0.5
-        self.b = b = center+extent*0.5
+        dim, = cast("tuple[int]", center.shape)
 
-        from numbers import Number
-        if isinstance(npoints, Number):
-            npoints = dim*(npoints,)
+        self.dimensions = dim
+        self.a = a = center - 0.5 * extent
+        self.b = b = center + 0.5 * extent
+
+        if points is None:
+            from numbers import Number
+            if isinstance(npoints, (int, Number)):
+                npoints = dim*(npoints,)
+            else:
+                if len(npoints) != dim:
+                    raise ValueError("length of npoints must match dimension")
+
+            for i in range(dim):
+                if npoints[i] == 1:
+                    a[i] = center[i]
+
+            mgrid_index = tuple(
+                    slice(a[i], b[i], 1j*npoints[i])
+                    for i in range(dim))
+            mgrid = np.mgrid[mgrid_index]
         else:
-            if len(npoints) != dim:
-                raise ValueError("length of npoints must match dimension")
-
-        for i in range(dim):
-            if npoints[i] == 1:
-                a[i] = center[i]
-
-        mgrid_index = tuple(
-                slice(a[i], b[i], 1j*npoints[i])
-                for i in range(dim))
-
-        # np.asarray is technically unneeded, used to placate pylint
-        # https://github.com/pylint-dev/pylint/issues/9989
-        mgrid = np.asarray(np.mgrid[mgrid_index])
+            mgrid = points
 
         # (axis, point x idx, point y idx, ...)
         self.nd_points = mgrid
-
         self.points = self.nd_points.reshape(dim, -1).copy()
+        self.npoints = int(np.prod(mgrid.shape[1:]))
 
-        from pytools import product
-        self.npoints = product(npoints)
-
-    def _get_nontrivial_dims(self):
+    def _get_nontrivial_dims(self) -> onp.Array1D[np.bool_]:
         return np.array(self.nd_points.shape[1:]) != 1
 
-    def _get_squeezed_bounds(self):
+    def _get_squeezed_bounds(
+            self
+        ) -> tuple[onp.Array1D[np.floating[Any]], onp.Array1D[np.floating[Any]]]:
         nontriv_dims = self._get_nontrivial_dims()
 
         return self.a[nontriv_dims], self.b[nontriv_dims]
 
-    def show_scalar_in_matplotlib(self, fld, max_val=None,
-            func_name="imshow", **kwargs):
+    def show_scalar_in_matplotlib(
+            self,
+            fld: onp.ArrayND[Any],
+            max_val: float | None = None,
+            func_name: str = "imshow",
+            **kwargs: Any) -> Any:
         squeezed_points = self.points.squeeze()
 
         if len(squeezed_points.shape) != 2:
@@ -158,31 +193,43 @@ class FieldPlotter:
         import matplotlib.pyplot as pt
         return getattr(pt, func_name)(squeezed_fld.T, **kwargs)
 
-    def set_matplotlib_limits(self):
+    def set_matplotlib_limits(self) -> None:
         import matplotlib.pyplot as pt
 
         a, b = self._get_squeezed_bounds()
         pt.xlim((a[0], b[0]))
         pt.ylim((a[1], b[1]))
 
-    def show_vector_in_mayavi(self, fld, do_show=True, **kwargs):
+    def show_vector_in_mayavi(
+            self,
+            fld: onp.ArrayND[Any],
+            do_show: bool = True,
+            **kwargs: Any) -> None:
         c = self.points
 
-        from mayavi import mlab  # pylint: disable=import-error
+        from mayavi import mlab
 
-        mlab.quiver3d(c[0], c[1], c[2], fld[0], fld[1], fld[2],
-                **kwargs)
+        mlab.quiver3d(c[0], c[1], c[2], fld[0], fld[1], fld[2], **kwargs)
 
         if do_show:
             mlab.show()
 
-    def write_vtk_file(self, file_name, data, real_only=False, overwrite=False):
+    def write_vtk_file(
+            self,
+            file_name: str | pathlib.Path,
+            data: Iterable[tuple[str, onp.ArrayND[Any]]], *,
+            real_only: bool = False,
+            overwrite: bool = False) -> None:
         from pyvisfile.vtk import write_structured_grid
         write_structured_grid(file_name, self.nd_points,
-                point_data=list(separate_by_real_and_imag(data, real_only)),
+                point_data=list(separate_by_real_and_imag(data, real_only=real_only)),
                 overwrite=overwrite)
 
-    def show_scalar_in_mayavi(self, fld, max_val=None, **kwargs):
+    def show_scalar_in_mayavi(
+            self,
+            fld: onp.ArrayND[Any],
+            max_val: float | None = None,
+            **kwargs: Any) -> None:
         if max_val is not None:
             fld[fld > max_val] = max_val
             fld[fld < -max_val] = -max_val
@@ -193,7 +240,7 @@ class FieldPlotter:
         nd_points = self.nd_points.squeeze()[self._get_nontrivial_dims()]
         squeezed_fld = fld.squeeze()
 
-        from mayavi import mlab  # pylint: disable=import-error
+        from mayavi import mlab
         mlab.surf(nd_points[0], nd_points[1], squeezed_fld, **kwargs)
 
 # vim: foldmethod=marker
